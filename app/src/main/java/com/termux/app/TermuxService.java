@@ -790,13 +790,17 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         // Set notification text
         int sessionCount = getTermuxSessionsSize();
         int taskCount = mShellManager.mTermuxTasks.size();
-        String notificationText = sessionCount + " session" + (sessionCount == 1 ? "" : "s");
+        String notificationText;
         if (taskCount > 0) {
-            notificationText += ", " + taskCount + " task" + (taskCount == 1 ? "" : "s");
+            notificationText = "Local controller running";
+        } else if (sessionCount > 0) {
+            notificationText = "Terminal recovery active";
+        } else {
+            notificationText = "Ready";
         }
 
         final boolean wakeLockHeld = mWakeLock != null;
-        if (wakeLockHeld) notificationText += " (wake lock held)";
+        if (wakeLockHeld) notificationText += " - wake lock held";
 
 
         // Set notification priority
@@ -819,7 +823,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         builder.setSmallIcon(R.drawable.ic_service_notification);
 
         // Set background color for small notification icon
-        builder.setColor(0xFF607D8B);
+        builder.setColor(0xFF2E7D32);
 
         // TermuxSessions are always ongoing
         builder.setOngoing(true);

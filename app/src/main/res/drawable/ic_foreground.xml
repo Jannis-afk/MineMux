@@ -3,26 +3,34 @@
     android:width="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-
-    <!-- Keep in sync with non-adaptive ic_launcher.xml -->
+    <path
+        android:fillColor="#1B5E20"
+        android:pathData="M54,14L86,31L54,48L22,31L54,14Z"/>
+    <path
+        android:fillColor="#6BCB77"
+        android:pathData="M54,20L77,32L54,44L31,32L54,20Z"/>
+    <path
+        android:fillColor="#7A4E2D"
+        android:pathData="M22,35L54,52V88L22,70V35Z"/>
+    <path
+        android:fillColor="#5B341E"
+        android:pathData="M86,35L54,52V88L86,70V35Z"/>
+    <path
+        android:fillColor="#8F5F38"
+        android:pathData="M31,42L40,47V57L31,52V42Z"/>
+    <path
+        android:fillColor="#A87545"
+        android:pathData="M43,57L52,62V72L43,67V57Z"/>
+    <path
+        android:fillColor="#3B2114"
+        android:pathData="M64,59L73,54V64L64,69V59Z"/>
+    <path
+        android:fillColor="#7EDC87"
+        android:pathData="M43,27L52,22L61,27L52,32L43,27Z"/>
+    <path
+        android:fillColor="#4CAF50"
+        android:pathData="M59,34L67,30L75,34L67,38L59,34Z"/>
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M34,38
-                          h6
-                          l12,16
-                          l-12,16
-                          h-6
-                          l12,-16
-                          "
-        />
-
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M56,66
-                          h18
-                          v4
-                          h-18
-                          "
-        />
-
+        android:pathData="M40,54H46L54,65L62,54H68V77H62V64L56,73H52L46,64V77H40V54Z"/>
 </vector>
