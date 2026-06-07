@@ -82,13 +82,15 @@ public class MineMuxActivity extends Activity {
     private TextView operationDetail;
     private ProgressBar globalProgress;
     private Button dashboardTab;
-    private Button setupTab;
-    private Button modsTab;
+    private Button serversTab;
     private Button backupsTab;
+    private Button settingsTab;
     private Button webButton;
     private String currentPage = "dashboard";
     private boolean controllerOnline;
     private boolean operationRunning;
+    private Boolean lastDashboardInstalled;
+    private Boolean lastDashboardRunning;
     private String operationMessage = "";
     private int setupStep;
     private int failedPolls;
@@ -96,6 +98,7 @@ public class MineMuxActivity extends Activity {
     private String wizardServerId = "main";
     private String wizardServerName = "Main Server";
     private String wizardVersion = "latest-compatible";
+    private String wizardLoader = "paper";
     private int wizardMemory = 2048;
     private int wizardPlayers = 8;
     private boolean wizardEula;
@@ -137,10 +140,6 @@ public class MineMuxActivity extends Activity {
         titleBlock.addView(text("MineMux", 30, TEXT, true));
         titleBlock.addView(text("Local Minecraft hosting", 13, MUTED, false));
 
-        Button terminal = secondaryButton("Terminal");
-        terminal.setOnClickListener(v -> startActivity(new Intent(this, TermuxActivity.class)));
-        header.addView(terminal, fixedButtonParams(112));
-
         notice = text("Starting local controller...", 14, WARNING, false);
         notice.setPadding(0, dp(14), 0, dp(10));
         root.addView(notice);
@@ -168,26 +167,22 @@ public class MineMuxActivity extends Activity {
         version = addMetric(hero, "Minecraft", "-");
         memory = addMetric(hero, "Memory", "-");
 
-        LinearLayout tabs = row();
-        root.addView(tabs, matchWrapMargin(0, dp(4), 0, dp(8)));
-        dashboardTab = tabButton("Home", "dashboard");
-        setupTab = tabButton("Setup", "setup");
-        modsTab = tabButton("Mods", "mods");
-        backupsTab = tabButton("Backups", "backups");
-        tabs.addView(dashboardTab, weightedTabParams());
-        tabs.addView(setupTab, weightedTabParams());
-        tabs.addView(modsTab, weightedTabParams());
-        tabs.addView(backupsTab, weightedTabParams());
-
         pageTitle = text("", 20, TEXT, true);
         root.addView(pageTitle);
 
         content = column();
         root.addView(content, matchWrap());
 
-        webButton = secondaryButton("Open Power UI");
-        webButton.setOnClickListener(v -> startActivity(new Intent(this, MineMuxWebActivity.class)));
-        root.addView(webButton, fullWidthButtonParams());
+        LinearLayout tabs = row();
+        root.addView(tabs, matchWrapMargin(0, dp(14), 0, 0));
+        dashboardTab = tabButton("Dashboard", "dashboard");
+        serversTab = tabButton("Servers", "servers");
+        backupsTab = tabButton("Backups", "backups");
+        settingsTab = tabButton("Settings", "settings");
+        tabs.addView(dashboardTab, weightedTabParams());
+        tabs.addView(serversTab, weightedTabParams());
+        tabs.addView(backupsTab, weightedTabParams());
+        tabs.addView(settingsTab, weightedTabParams());
 
         setPage("dashboard");
         return scroll;
@@ -199,8 +194,9 @@ public class MineMuxActivity extends Activity {
         content.removeAllViews();
         updateTabs();
         if ("setup".equals(page)) buildSetupPage();
-        else if ("mods".equals(page)) buildModsPage();
+        else if ("servers".equals(page)) buildServersPage();
         else if ("backups".equals(page)) buildBackupsPage();
+        else if ("settings".equals(page)) buildSettingsPage();
         else buildDashboardPage();
         setControllerActionsEnabled(controllerOnline);
     }
@@ -226,6 +222,7 @@ public class MineMuxActivity extends Activity {
             live.addView(text(activeServerRunning() ? "Live server running" : "Last server", 18, TEXT, true));
             live.addView(text(joinAddress.getText().toString(), 22, ACCENT, true));
             live.addView(text("Minecraft " + version.getText() + "  " + memory.getText(), 13, MUTED, false));
+            live.addView(text("Uptime " + uptimeText() + "  TPS " + tpsText() + "  Players " + playerCountText(), 13, MUTED, false));
 
             LinearLayout controls = row();
             content.addView(controls, matchWrapMargin(0, 0, 0, dp(8)));
@@ -238,6 +235,15 @@ public class MineMuxActivity extends Activity {
             Button restart = secondaryButton("Restart");
             restart.setOnClickListener(v -> actionButton(restart, "/api/server/restart", "{}", "Restarting server..."));
             controls.addView(restart, weightedButtonParams());
+
+            LinearLayout playerActions = row();
+            content.addView(playerActions, matchWrapMargin(0, 0, 0, dp(8)));
+            Button listPlayers = secondaryButton("List Players");
+            listPlayers.setOnClickListener(v -> actionButton(listPlayers, "/api/server/command", "{\"command\":\"list\"}", "Asking server for player list..."));
+            playerActions.addView(listPlayers, weightedButtonParams());
+            Button saveAll = secondaryButton("Save World");
+            saveAll.setOnClickListener(v -> actionButton(saveAll, "/api/server/command", "{\"command\":\"save-all\"}", "Saving world..."));
+            playerActions.addView(saveAll, weightedButtonParams());
         }
 
         TextView serversTitle = text("Servers", 15, TEXT, true);
@@ -296,10 +302,10 @@ public class MineMuxActivity extends Activity {
 
     private void buildSetupVersionStep(LinearLayout panel) {
         panel.addView(text("Choose Minecraft", 19, TEXT, true));
-        panel.addView(text("Paper is selected because it is the working phone-friendly runtime in this MVP. Fabric and NeoForge are planned later.", 13, MUTED, false));
+        panel.addView(text("Choose the runtime MineMux should install. Paper is best for plugins, Vanilla is simplest, and Forge-family loaders are for modded servers.", 13, MUTED, false));
         Spinner versionSpinner = spinner(new String[]{wizardVersion, "latest-compatible", "1.21.8", "1.21.7", "1.21.6", "1.21.5", "1.21.4", "1.20.6", "1.20.4"});
         addField(panel, "Minecraft version", versionSpinner);
-        Spinner loaderSpinner = spinner(new String[]{"paper - Paper Plugins", "fabric - coming soon", "neoforge - coming soon"});
+        Spinner loaderSpinner = spinner(new String[]{"paper - Paper Plugins", "vanilla - Vanilla", "quilt - Quilt Mods", "forge - Forge Mods", "neoforge - NeoForge Mods"});
         addField(panel, "Runtime", loaderSpinner);
         loadSetupOptions(versionSpinner, loaderSpinner);
         setupNav(panel, () -> {
@@ -307,11 +313,8 @@ public class MineMuxActivity extends Activity {
             setPage("setup");
         }, () -> {
             String loaderChoice = loaderSpinner.getSelectedItem().toString();
-            if (!loaderChoice.startsWith("paper")) {
-                setNotice("Only Paper Plugins are supported in this MVP build.", true);
-                return;
-            }
             wizardVersion = versionSpinner.getSelectedItem().toString();
+            wizardLoader = loaderId(loaderChoice);
             setupStep = 2;
             setPage("setup");
         }, "Next");
@@ -338,7 +341,7 @@ public class MineMuxActivity extends Activity {
     private void buildSetupConfirmStep(LinearLayout panel) {
         panel.addView(text("Review and create", 19, TEXT, true));
         panel.addView(summaryLine("Server", wizardServerName + " (" + wizardServerId + ")"));
-        panel.addView(summaryLine("Runtime", "Paper Plugins"));
+        panel.addView(summaryLine("Runtime", wizardLoader));
         panel.addView(summaryLine("Minecraft", wizardVersion));
         panel.addView(summaryLine("Resources", wizardMemory + " MB, " + wizardPlayers + " players"));
         CheckBox eula = new CheckBox(this);
@@ -360,7 +363,7 @@ public class MineMuxActivity extends Activity {
             String body = "{"
                 + "\"serverId\":\"" + escapeJson(wizardServerId) + "\","
                 + "\"name\":\"" + escapeJson(wizardServerName) + "\","
-                + "\"loader\":\"paper\","
+                + "\"loader\":\"" + escapeJson(wizardLoader) + "\","
                 + "\"minecraftVersion\":\"" + escapeJson(wizardVersion) + "\","
                 + "\"memoryMb\":" + wizardMemory + ","
                 + "\"maxPlayers\":" + wizardPlayers + ","
@@ -443,6 +446,21 @@ public class MineMuxActivity extends Activity {
         }, error -> list.addView(emptyState(error)));
     }
 
+    private void buildServersPage() {
+        pageTitle.setText("Servers");
+        Button create = primaryButton("Create New Server");
+        create.setOnClickListener(v -> {
+            setupStep = 0;
+            wizardServerId = "server-" + System.currentTimeMillis() / 1000;
+            wizardServerName = "New Server";
+            setPage("setup");
+        });
+        content.addView(create, fullWidthButtonParams());
+        LinearLayout list = column();
+        content.addView(list, matchWrapMargin(0, dp(10), 0, 0));
+        loadServers(list);
+    }
+
     private View serverRow(JSONObject server) {
         LinearLayout row = card();
         row.setPadding(dp(12), dp(12), dp(12), dp(12));
@@ -458,7 +476,33 @@ public class MineMuxActivity extends Activity {
             use.setOnClickListener(v -> actionButton(use, "/api/servers/switch", "{\"serverId\":\"" + escapeJson(id) + "\"}", "Switching server..."));
             row.addView(use, fullWidthButtonParams());
         }
+        Button details = secondaryButton("Details");
+        details.setOnClickListener(v -> showServerDetails(server));
+        row.addView(details, fullWidthButtonParams());
         return row;
+    }
+
+    private void showServerDetails(JSONObject server) {
+        currentPage = "servers";
+        content.removeAllViews();
+        updateTabs();
+        pageTitle.setText(server.optString("name", "Server"));
+        LinearLayout detail = card();
+        detail.setPadding(dp(14), dp(14), dp(14), dp(14));
+        content.addView(detail, matchWrapMargin(0, dp(6), 0, dp(10)));
+        JSONObject profile = server.optJSONObject("profile");
+        detail.addView(summaryLine("ID", server.optString("id", "-")));
+        detail.addView(summaryLine("Status", server.optBoolean("running") ? "Running" : server.optBoolean("installed") ? "Ready" : "Needs setup"));
+        detail.addView(summaryLine("Join", server.optString("joinAddress", "-")));
+        if (profile != null) {
+            detail.addView(summaryLine("Runtime", profile.optString("loader", "-")));
+            detail.addView(summaryLine("Minecraft", profile.optString("minecraftVersion", "-")));
+            detail.addView(summaryLine("Memory", profile.optInt("memoryMb", 0) + " MB"));
+            detail.addView(summaryLine("Players", String.valueOf(profile.optInt("maxPlayers", 0))));
+        }
+        Button back = secondaryButton("Back to Servers");
+        back.setOnClickListener(v -> setPage("servers"));
+        content.addView(back, fullWidthButtonParams());
     }
 
     private void buildModsPage() {
@@ -550,6 +594,9 @@ public class MineMuxActivity extends Activity {
 
     private void buildBackupsPage() {
         pageTitle.setText("Backups");
+        TextView intro = text("Restore points include the active server name and backup date. MineMux creates restore points before mod changes when that setting is enabled.", 13, MUTED, false);
+        intro.setPadding(0, dp(4), 0, dp(8));
+        content.addView(intro);
         LinearLayout actions = row();
         content.addView(actions, matchWrapMargin(0, dp(6), 0, dp(8)));
         Button create = primaryButton("Create");
@@ -562,6 +609,29 @@ public class MineMuxActivity extends Activity {
         LinearLayout list = column();
         content.addView(list, matchWrap());
         loadBackups(list);
+    }
+
+    private void buildSettingsPage() {
+        pageTitle.setText("Settings");
+        LinearLayout advanced = card();
+        advanced.setPadding(dp(14), dp(14), dp(14), dp(14));
+        content.addView(advanced, matchWrapMargin(0, dp(6), 0, dp(10)));
+        advanced.addView(text("Advanced tools", 16, TEXT, true));
+        advanced.addView(text("Use these only when you need shell recovery or the web power UI.", 12, MUTED, false));
+        Button terminal = secondaryButton("Open Terminal");
+        terminal.setOnClickListener(v -> startActivity(new Intent(this, TermuxActivity.class)));
+        advanced.addView(terminal, fullWidthButtonParams());
+        webButton = secondaryButton("Open Power UI");
+        webButton.setOnClickListener(v -> startActivity(new Intent(this, MineMuxWebActivity.class)));
+        advanced.addView(webButton, fullWidthButtonParams());
+
+        LinearLayout info = card();
+        info.setPadding(dp(14), dp(14), dp(14), dp(14));
+        content.addView(info, matchWrapMargin(0, 0, 0, dp(10)));
+        info.addView(text("Runtime", 16, TEXT, true));
+        info.addView(summaryLine("Controller", controllerOnline ? "Online" : "Starting"));
+        info.addView(summaryLine("Join address", joinAddress.getText().toString()));
+        info.addView(summaryLine("Package", "com.termux MVP runtime"));
     }
 
     private void loadBackups(LinearLayout list) {
@@ -630,6 +700,14 @@ public class MineMuxActivity extends Activity {
                 setControllerActionsEnabled(true);
                 setNotice(server.optString("lastError", ""), server.has("lastError") && !server.optString("lastError").isEmpty());
                 if ("dashboard".equals(currentPage) || operationRunning) refreshLogs();
+                boolean installedNow = server.optBoolean("installed");
+                boolean runningNow = server.optBoolean("running");
+                if ("dashboard".equals(currentPage)
+                    && (lastDashboardInstalled == null || lastDashboardInstalled != installedNow || lastDashboardRunning == null || lastDashboardRunning != runningNow)) {
+                    lastDashboardInstalled = installedNow;
+                    lastDashboardRunning = runningNow;
+                    setPage("dashboard");
+                }
             } catch (Exception e) {
                 setNotice(e.getMessage(), true);
             }
@@ -820,7 +898,7 @@ public class MineMuxActivity extends Activity {
     }
 
     private boolean isTabButton(Button button) {
-        return button == dashboardTab || button == setupTab || button == modsTab || button == backupsTab;
+        return button == dashboardTab || button == serversTab || button == backupsTab || button == settingsTab;
     }
 
     private boolean activeServerInstalled() {
@@ -841,11 +919,41 @@ public class MineMuxActivity extends Activity {
         }
     }
 
+    private String uptimeText() {
+        try {
+            long seconds = latestStatus.getJSONObject("server").optLong("uptimeSec", 0);
+            if (seconds <= 0) return "-";
+            long minutes = seconds / 60;
+            long hours = minutes / 60;
+            if (hours > 0) return hours + "h " + (minutes % 60) + "m";
+            return minutes + "m";
+        } catch (Exception e) {
+            return "-";
+        }
+    }
+
+    private String tpsText() {
+        try {
+            double tps = latestStatus.getJSONObject("server").optDouble("tps", 0);
+            return tps <= 0 ? "-" : new DecimalFormat("#.#").format(tps);
+        } catch (Exception e) {
+            return "-";
+        }
+    }
+
+    private String playerCountText() {
+        try {
+            return String.valueOf(latestStatus.getJSONObject("server").optInt("players", 0));
+        } catch (Exception e) {
+            return "0";
+        }
+    }
+
     private void updateTabs() {
         styleTab(dashboardTab, "dashboard".equals(currentPage));
-        styleTab(setupTab, "setup".equals(currentPage));
-        styleTab(modsTab, "mods".equals(currentPage));
+        styleTab(serversTab, "servers".equals(currentPage));
         styleTab(backupsTab, "backups".equals(currentPage));
+        styleTab(settingsTab, "settings".equals(currentPage));
     }
 
     private TextView addMetric(LinearLayout parent, String label, String value) {
@@ -1037,6 +1145,16 @@ public class MineMuxActivity extends Activity {
     private String valueOr(EditText editText, String fallback) {
         String value = editText.getText().toString().trim();
         return value.isEmpty() ? fallback : value;
+    }
+
+    private String loaderId(String label) {
+        String value = label == null ? "" : label.trim().toLowerCase();
+        int space = value.indexOf(' ');
+        if (space > 0) value = value.substring(0, space);
+        int dash = value.indexOf('-');
+        if (dash > 0) value = value.substring(0, dash).trim();
+        if (value.isEmpty()) return "paper";
+        return value;
     }
 
     private String escapeJson(String value) {

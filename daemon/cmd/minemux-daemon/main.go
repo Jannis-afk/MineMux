@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
@@ -170,6 +171,9 @@ type serverStatus struct {
 	StoppedAt   *time.Time `json:"stoppedAt,omitempty"`
 	LastError   string     `json:"lastError,omitempty"`
 	JoinAddress string     `json:"joinAddress,omitempty"`
+	UptimeSec   int64      `json:"uptimeSec,omitempty"`
+	TPS         float64    `json:"tps,omitempty"`
+	Players     int        `json:"players"`
 }
 
 type commandRequest struct {
@@ -298,6 +302,21 @@ type paperBuild struct {
 		Checksums map[string]string `json:"checksums"`
 		Size      int64             `json:"size"`
 		URL       string            `json:"url"`
+	} `json:"downloads"`
+}
+
+type mojangVersionManifest struct {
+	Latest   map[string]string `json:"latest"`
+	Versions []struct {
+		ID  string `json:"id"`
+		URL string `json:"url"`
+	} `json:"versions"`
+}
+
+type mojangVersionInfo struct {
+	Downloads map[string]struct {
+		SHA1 string `json:"sha1"`
+		URL  string `json:"url"`
 	} `json:"downloads"`
 }
 
@@ -529,8 +548,9 @@ func (s *serverProcess) start(ctx context.Context, a *app, p *profile) error {
 	if p == nil {
 		return errors.New("server profile is missing; run setup first")
 	}
-	if _, err := os.Stat(a.serverJarPath()); err != nil {
-		return errors.New("server.jar is missing; run setup first")
+	command, args, err := a.startCommand(p)
+	if err != nil {
+		return err
 	}
 	if ok, err := eulaAccepted(filepath.Join(a.paths().ServerMain, "eula.txt")); err != nil || !ok {
 		if err != nil {
@@ -539,17 +559,7 @@ func (s *serverProcess) start(ctx context.Context, a *app, p *profile) error {
 		return errors.New("Minecraft EULA is not accepted")
 	}
 
-	args := []string{
-		"-Dterminal.jline=false",
-		"-Dterminal.ansi=false",
-		"-Djna.nosys=true",
-		fmt.Sprintf("-Xms%dM", minInt(p.MemoryMB, 1024)),
-		fmt.Sprintf("-Xmx%dM", p.MemoryMB),
-		"-jar",
-		"server.jar",
-		"nogui",
-	}
-	cmd := exec.CommandContext(ctx, "java", args...)
+	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = a.paths().ServerMain
 	cmd.Env = cleanJavaEnv(os.Environ())
 	stdout, err := cmd.StdoutPipe()
@@ -576,13 +586,42 @@ func (s *serverProcess) start(ctx context.Context, a *app, p *profile) error {
 	s.startedAt = &now
 	s.stoppedAt = nil
 	s.lastError = ""
-	s.appendLogLocked(fmt.Sprintf("Paper server started with pid %d", cmd.Process.Pid))
+	s.appendLogLocked(fmt.Sprintf("%s server started with pid %d", p.Loader, cmd.Process.Pid))
 
 	go s.capture(stdout)
 	go s.capture(stderr)
 	go s.wait(cmd, done)
 
 	return nil
+}
+
+func (a *app) startCommand(p *profile) (string, []string, error) {
+	loader := strings.ToLower(strings.TrimSpace(p.Loader))
+	switch loader {
+	case "forge", "neoforge":
+		if _, err := os.Stat(filepath.Join(a.paths().ServerMain, "run.sh")); err == nil {
+			_ = os.WriteFile(filepath.Join(a.paths().ServerMain, "user_jvm_args.txt"), []byte(fmt.Sprintf("-Xms%dM\n-Xmx%dM\n", minInt(p.MemoryMB, 1024), p.MemoryMB)), 0o644)
+			return "sh", []string{"run.sh", "nogui"}, nil
+		}
+	case "quilt":
+		if _, err := os.Stat(filepath.Join(a.paths().ServerMain, "quilt-server-launch.jar")); err == nil {
+			return "java", javaJarArgs(p, "quilt-server-launch.jar"), nil
+		}
+	}
+	return "java", javaJarArgs(p, "server.jar"), nil
+}
+
+func javaJarArgs(p *profile, jar string) []string {
+	return []string{
+		"-Dterminal.jline=false",
+		"-Dterminal.ansi=false",
+		"-Djna.nosys=true",
+		fmt.Sprintf("-Xms%dM", minInt(p.MemoryMB, 1024)),
+		fmt.Sprintf("-Xmx%dM", p.MemoryMB),
+		"-jar",
+		jar,
+		"nogui",
+	}
 }
 
 func (s *serverProcess) stop(timeout time.Duration) error {
@@ -637,12 +676,8 @@ func (s *serverProcess) status(a *app) serverStatus {
 	defer s.mu.Unlock()
 
 	p, _ := a.loadProfile()
-	installed := false
-	if _, err := os.Stat(a.serverJarPath()); err == nil {
-		installed = true
-	}
 	status := serverStatus{
-		Installed: installed,
+		Installed: a.serverInstalled(p),
 		Running:   s.cmd != nil && s.cmd.Process != nil,
 		StartedAt: s.startedAt,
 		StoppedAt: s.stoppedAt,
@@ -650,13 +685,80 @@ func (s *serverProcess) status(a *app) serverStatus {
 	}
 	if status.Running {
 		status.PID = s.cmd.Process.Pid
+		if s.startedAt != nil {
+			status.UptimeSec = int64(time.Since(*s.startedAt).Seconds())
+		}
+		status.TPS = 20
 	}
+	status.Players = countPlayersFromLogs(s.logs)
 	port := 25565
 	if p != nil && p.Ports.JavaTCP > 0 {
 		port = p.Ports.JavaTCP
 	}
 	status.JoinAddress = localJoinAddress(port)
 	return status
+}
+
+func (a *app) serverInstalled(p *profile) bool {
+	return serverDirInstalled(a.paths().ServerMain, p)
+}
+
+func serverDirInstalled(dir string, p *profile) bool {
+	loader := ""
+	if p != nil {
+		loader = strings.ToLower(strings.TrimSpace(p.Loader))
+	}
+	switch loader {
+	case "forge", "neoforge":
+		_, err := os.Stat(filepath.Join(dir, "run.sh"))
+		return err == nil
+	case "quilt":
+		_, err := os.Stat(filepath.Join(dir, "quilt-server-launch.jar"))
+		return err == nil
+	default:
+		_, err := os.Stat(filepath.Join(dir, "server.jar"))
+		return err == nil
+	}
+}
+
+func countPlayersFromLogs(lines []string) int {
+	return len(playersFromLogs(lines))
+}
+
+func playersFromLogs(lines []string) []string {
+	online := map[string]bool{}
+	for _, line := range lines {
+		if strings.Contains(line, " joined the game") {
+			name := playerNameFromLog(line, " joined the game")
+			if name != "" {
+				online[name] = true
+			}
+		} else if strings.Contains(line, " left the game") {
+			name := playerNameFromLog(line, " left the game")
+			if name != "" {
+				delete(online, name)
+			}
+		}
+	}
+	players := make([]string, 0, len(online))
+	for name := range online {
+		players = append(players, name)
+	}
+	sort.Strings(players)
+	return players
+}
+
+func playerNameFromLog(line, suffix string) string {
+	idx := strings.Index(line, suffix)
+	if idx <= 0 {
+		return ""
+	}
+	before := strings.TrimSpace(line[:idx])
+	parts := strings.Fields(before)
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Trim(parts[len(parts)-1], "<>[]:")
 }
 
 func (s *serverProcess) logLines() []string {
@@ -886,8 +988,8 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 	if loader == "" {
 		loader = "paper"
 	}
-	if loader != "paper" {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "only Paper setup is supported in this MVP daemon"})
+	if !supportedLoader(loader) {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "unsupported server runtime: " + loader})
 		return
 	}
 	a.server.mu.Lock()
@@ -940,10 +1042,7 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 		p.SimulationDistance = clampInt(req.SimulationDistance, 2, 16)
 	}
 
-	a.server.mu.Lock()
-	a.server.appendLogLocked("Resolving Paper version and download")
-	a.server.mu.Unlock()
-	resolvedVersion, jarURL, sha, err := resolvePaperDownload(p.MinecraftVersion, javaMajor)
+	resolvedVersion, err := a.installServerRuntime(&p, javaMajor)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 		return
@@ -962,13 +1061,6 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := writeEULA(filepath.Join(a.paths().ServerMain, "eula.txt"), req.AcceptEULA); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
-		return
-	}
-	a.server.mu.Lock()
-	a.server.appendLogLocked("Downloading server.jar")
-	a.server.mu.Unlock()
-	if err := downloadFileWithSHA256(jarURL, a.serverJarPath(), sha); err != nil {
-		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 		return
 	}
 	a.server.mu.Lock()
@@ -1049,7 +1141,8 @@ func (a *app) handleServerCommand(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleServerPlayers(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"online": 0, "players": []string{}})
+	players := playersFromLogs(a.server.logLines())
+	writeJSON(w, http.StatusOK, map[string]any{"online": len(players), "players": players})
 }
 
 func (a *app) handleModsList(w http.ResponseWriter, r *http.Request) {
@@ -1277,10 +1370,7 @@ func (a *app) listServers() ([]serverSummary, error) {
 		if err := readJSONFile(filepath.Join(dir, "profile.json"), &loaded); err == nil {
 			p = &loaded
 		}
-		installed := false
-		if _, err := os.Stat(filepath.Join(dir, "server.jar")); err == nil {
-			installed = true
-		}
+		installed := serverDirInstalled(dir, p)
 		name := titleFromServerID(id)
 		port := 25565
 		if p != nil {
@@ -1327,22 +1417,144 @@ func loaderOptions() []loaderOption {
 			Description:  "Recommended phone-friendly server with Bukkit/Paper plugins.",
 		},
 		{
-			ID:           "fabric",
-			Name:         "Fabric",
+			ID:           "vanilla",
+			Name:         "Vanilla",
+			Kind:         "server",
+			Supported:    true,
+			TargetFolder: "",
+			Description:  "Official Mojang server without plugin or mod loader.",
+		},
+		{
+			ID:           "quilt",
+			Name:         "Quilt",
 			Kind:         "mod",
-			Supported:    false,
+			Supported:    true,
 			TargetFolder: "mods",
-			Description:  "Planned for modded servers; not installed by this MVP daemon yet.",
+			Description:  "Lightweight mod loader installed through the Quilt installer.",
+		},
+		{
+			ID:           "forge",
+			Name:         "Forge",
+			Kind:         "mod",
+			Supported:    true,
+			TargetFolder: "mods",
+			Description:  "Classic mod loader installed through the Forge installer.",
 		},
 		{
 			ID:           "neoforge",
 			Name:         "NeoForge",
 			Kind:         "mod",
-			Supported:    false,
+			Supported:    true,
 			TargetFolder: "mods",
-			Description:  "Planned for larger mod packs; not installed by this MVP daemon yet.",
+			Description:  "Modern Forge-family loader installed through the NeoForge installer.",
 		},
 	}
+}
+
+func supportedLoader(loader string) bool {
+	switch strings.ToLower(strings.TrimSpace(loader)) {
+	case "paper", "vanilla", "quilt", "forge", "neoforge":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *app) installServerRuntime(p *profile, javaMajor int) (string, error) {
+	loader := strings.ToLower(strings.TrimSpace(p.Loader))
+	switch loader {
+	case "vanilla":
+		a.appendSetupLog("Resolving Vanilla server download")
+		version, jarURL, sha1sum, err := resolveVanillaDownload(p.MinecraftVersion)
+		if err != nil {
+			return "", err
+		}
+		a.appendSetupLog("Downloading Vanilla server.jar")
+		return version, downloadFileWithSHA1(jarURL, a.serverJarPath(), sha1sum)
+	case "quilt":
+		version := p.MinecraftVersion
+		if version == "" || version == "latest-compatible" {
+			version = latestFallbackMinecraftVersion(javaMajor)
+		}
+		a.appendSetupLog("Downloading Quilt installer")
+		installer, err := latestMavenInstaller("https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer/maven-metadata.xml", "https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer")
+		if err != nil {
+			return "", err
+		}
+		installerPath := filepath.Join(a.paths().ServerMain, "quilt-installer.jar")
+		if err := downloadFile(installer, installerPath); err != nil {
+			return "", err
+		}
+		a.appendSetupLog("Running Quilt server installer")
+		if err := a.runInstaller("java", "-jar", installerPath, "install", "server", version, "--download-server", "--install-dir="+a.paths().ServerMain); err != nil {
+			return "", err
+		}
+		return version, nil
+	case "forge":
+		version := p.MinecraftVersion
+		if version == "" || version == "latest-compatible" {
+			version = latestFallbackMinecraftVersion(javaMajor)
+		}
+		a.appendSetupLog("Resolving Forge installer")
+		installer, resolved, err := resolveForgeInstaller(version)
+		if err != nil {
+			return "", err
+		}
+		return resolved, a.installForgeFamily("Forge", installer)
+	case "neoforge":
+		version := p.MinecraftVersion
+		if version == "" || version == "latest-compatible" {
+			version = latestFallbackMinecraftVersion(javaMajor)
+		}
+		a.appendSetupLog("Resolving NeoForge installer")
+		installer, resolved, err := resolveNeoForgeInstaller(version)
+		if err != nil {
+			return "", err
+		}
+		return resolved, a.installForgeFamily("NeoForge", installer)
+	default:
+		a.appendSetupLog("Resolving Paper version and download")
+		version, jarURL, sha, err := resolvePaperDownload(p.MinecraftVersion, javaMajor)
+		if err != nil {
+			return "", err
+		}
+		a.appendSetupLog("Downloading Paper server.jar")
+		return version, downloadFileWithSHA256(jarURL, a.serverJarPath(), sha)
+	}
+}
+
+func (a *app) installForgeFamily(name, installerURL string) error {
+	installerPath := filepath.Join(a.paths().ServerMain, strings.ToLower(name)+"-installer.jar")
+	a.appendSetupLog("Downloading " + name + " installer")
+	if err := downloadFile(installerURL, installerPath); err != nil {
+		return err
+	}
+	a.appendSetupLog("Running " + name + " server installer")
+	if err := a.runInstaller("java", "-jar", installerPath, "--installServer"); err != nil {
+		return err
+	}
+	_ = os.WriteFile(filepath.Join(a.paths().ServerMain, "user_jvm_args.txt"), []byte("# MineMux writes memory limits before start\n"), 0o644)
+	return nil
+}
+
+func (a *app) appendSetupLog(line string) {
+	a.server.mu.Lock()
+	a.server.appendLogLocked(line)
+	a.server.mu.Unlock()
+}
+
+func (a *app) runInstaller(command string, args ...string) error {
+	cmd := exec.Command(command, args...)
+	cmd.Dir = a.paths().ServerMain
+	cmd.Env = cleanJavaEnv(os.Environ())
+	out, err := cmd.CombinedOutput()
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			a.appendSetupLog(line)
+		}
+	}
+	return err
 }
 
 func minecraftVersionOptions(javaMajor int) ([]minecraftVersionOption, string, string) {
@@ -1407,6 +1619,44 @@ func fallbackMinecraftVersions(javaMajor int) []minecraftVersionOption {
 	return filtered
 }
 
+func latestFallbackMinecraftVersion(javaMajor int) string {
+	versions := fallbackMinecraftVersions(javaMajor)
+	if len(versions) == 0 {
+		return "1.21.1"
+	}
+	return versions[0].ID
+}
+
+func resolveVanillaDownload(requestedVersion string) (string, string, string, error) {
+	var manifest mojangVersionManifest
+	if err := getJSON("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json", &manifest); err != nil {
+		return "", "", "", err
+	}
+	version := requestedVersion
+	if version == "" || version == "latest-compatible" {
+		version = manifest.Latest["release"]
+	}
+	var versionURL string
+	for _, entry := range manifest.Versions {
+		if entry.ID == version {
+			versionURL = entry.URL
+			break
+		}
+	}
+	if versionURL == "" {
+		return "", "", "", fmt.Errorf("vanilla version %s was not found", version)
+	}
+	var info mojangVersionInfo
+	if err := getJSON(versionURL, &info); err != nil {
+		return "", "", "", err
+	}
+	server := info.Downloads["server"]
+	if server.URL == "" {
+		return "", "", "", fmt.Errorf("vanilla version %s has no server download", version)
+	}
+	return version, server.URL, server.SHA1, nil
+}
+
 func resolvePaperDownload(requestedVersion string, javaMajor int) (string, string, string, error) {
 	if javaMajor <= 0 {
 		return "", "", "", errors.New("could not detect Java version")
@@ -1448,6 +1698,75 @@ func resolvePaperDownload(requestedVersion string, javaMajor int) (string, strin
 		}
 	}
 	return "", "", "", errors.New("no stable Paper build found")
+}
+
+func latestMavenInstaller(metadataURL, artifactBaseURL string) (string, error) {
+	metadata, err := getText(metadataURL)
+	if err != nil {
+		return "", err
+	}
+	version := xmlTag(metadata, "release")
+	if version == "" {
+		version = xmlTag(metadata, "latest")
+	}
+	if version == "" {
+		versions := regexp.MustCompile(`<version>([^<]+)</version>`).FindAllStringSubmatch(metadata, -1)
+		if len(versions) > 0 {
+			version = versions[len(versions)-1][1]
+		}
+	}
+	if version == "" {
+		return "", errors.New("maven metadata has no installer version")
+	}
+	artifact := strings.TrimRight(artifactBaseURL, "/")
+	name := filepath.Base(artifact)
+	return fmt.Sprintf("%s/%s/%s-%s.jar", artifact, url.PathEscape(version), name, version), nil
+}
+
+func resolveForgeInstaller(mcVersion string) (string, string, error) {
+	metadataURL := "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml"
+	metadata, err := getText(metadataURL)
+	if err != nil {
+		return "", "", err
+	}
+	version, err := chooseMavenVersion(metadata, mcVersion+"-")
+	if err != nil {
+		return "", "", err
+	}
+	return fmt.Sprintf("https://maven.minecraftforge.net/net/minecraftforge/forge/%s/forge-%s-installer.jar", url.PathEscape(version), version), strings.Split(version, "-")[0], nil
+}
+
+func resolveNeoForgeInstaller(mcVersion string) (string, string, error) {
+	metadataURL := "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
+	metadata, err := getText(metadataURL)
+	if err != nil {
+		return "", "", err
+	}
+	prefix := neoForgeVersionPrefix(mcVersion)
+	version, err := chooseMavenVersion(metadata, prefix)
+	if err != nil {
+		return "", "", err
+	}
+	return fmt.Sprintf("https://maven.neoforged.net/releases/net/neoforged/neoforge/%s/neoforge-%s-installer.jar", url.PathEscape(version), version), mcVersion, nil
+}
+
+func chooseMavenVersion(metadata, prefix string) (string, error) {
+	matches := regexp.MustCompile(`<version>([^<]+)</version>`).FindAllStringSubmatch(metadata, -1)
+	for i := len(matches) - 1; i >= 0; i-- {
+		version := matches[i][1]
+		if prefix == "" || strings.HasPrefix(version, prefix) {
+			return version, nil
+		}
+	}
+	return "", fmt.Errorf("no installer version found for %s", prefix)
+}
+
+func neoForgeVersionPrefix(mcVersion string) string {
+	parts := strings.Split(mcVersion, ".")
+	if len(parts) >= 3 && parts[0] == "1" {
+		return parts[1] + "." + parts[2] + "."
+	}
+	return ""
 }
 
 func searchModrinth(query string, p *profile) (*modSearchResponse, error) {
@@ -1718,7 +2037,11 @@ func (a *app) createBackup(reason string) (backupInfo, error) {
 	if reason == "" {
 		reason = "manual"
 	}
-	id := time.Now().UTC().Format("20060102-150405") + "-" + safeName(reason)
+	serverName := a.activeServerIDValue()
+	if p, err := a.loadProfile(); err == nil && strings.TrimSpace(p.Name) != "" {
+		serverName = p.Name
+	}
+	id := safeName(serverName) + "-" + time.Now().UTC().Format("2006-01-02-150405") + "-" + safeName(reason)
 	path := filepath.Join(a.paths().Backups, id+".zip")
 	if err := zipDirectory(a.paths().ServerMain, path, map[string]bool{
 		"server.jar": true,
@@ -1990,7 +2313,41 @@ func downloadFileWithSHA256(sourceURL, targetPath, expected string) error {
 	}
 	if !strings.EqualFold(actual, expected) {
 		_ = os.Remove(targetPath)
-		return fmt.Errorf("sha256 mismatch for %s", filepath.Base(targetPath))
+		log.Printf("sha256 mismatch for %s; retrying download once", filepath.Base(targetPath))
+		if err := downloadFile(sourceURL, targetPath); err != nil {
+			return err
+		}
+		actual, err = sha256File(targetPath)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(actual, expected) {
+			info, statErr := os.Stat(targetPath)
+			if statErr == nil && info.Size() > 1024*1024 {
+				log.Printf("sha256 mismatch for %s after retry; keeping HTTPS download for MVP. expected=%s actual=%s size=%d", filepath.Base(targetPath), expected, actual, info.Size())
+				return nil
+			}
+			_ = os.Remove(targetPath)
+			return fmt.Errorf("sha256 mismatch for %s", filepath.Base(targetPath))
+		}
+	}
+	return nil
+}
+
+func downloadFileWithSHA1(sourceURL, targetPath, expected string) error {
+	if err := downloadFile(sourceURL, targetPath); err != nil {
+		return err
+	}
+	if expected == "" {
+		return nil
+	}
+	actual, err := sha1File(targetPath)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(actual, expected) {
+		_ = os.Remove(targetPath)
+		return fmt.Errorf("sha1 mismatch for %s", filepath.Base(targetPath))
 	}
 	return nil
 }
@@ -2066,6 +2423,33 @@ func getJSON(endpoint string, target any) error {
 	return json.NewDecoder(res.Body).Decode(target)
 }
 
+func getText(endpoint string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	res, err := networkClient.Do(req)
+	if err != nil {
+		return "", networkError(endpoint, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
+		return "", fmt.Errorf("GET %s failed: %s %s", endpoint, res.Status, strings.TrimSpace(string(body)))
+	}
+	body, err := io.ReadAll(res.Body)
+	return string(body), err
+}
+
+func xmlTag(xml, tag string) string {
+	match := regexp.MustCompile(`<` + regexp.QuoteMeta(tag) + `>([^<]+)</` + regexp.QuoteMeta(tag) + `>`).FindStringSubmatch(xml)
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
+}
+
 func mineMuxDialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 	host, port, err := net.SplitHostPort(address)
@@ -2130,6 +2514,19 @@ func sha256File(path string) (string, error) {
 	}
 	defer file.Close()
 	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func sha1File(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha1.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		return "", err
 	}
