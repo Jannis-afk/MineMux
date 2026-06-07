@@ -55,6 +55,7 @@ public class MineMuxActivity extends Activity {
     private static final int STROKE = 0xff26364f;
     private static final int TEXT = 0xfff5f7fb;
     private static final int MUTED = 0xff9aa8bc;
+    private static final int TERTIARY = 0xff6f7b8f;
     private static final int ACCENT = 0xff2f86ff;
     private static final int GREEN = 0xff58df6c;
     private static final int ACCENT_TEXT = 0xffffffff;
@@ -88,7 +89,6 @@ public class MineMuxActivity extends Activity {
     private ProgressBar globalProgress;
     private Button dashboardTab;
     private Button serversTab;
-    private Button backupsTab;
     private Button settingsTab;
     private Button webButton;
     private String currentPage = "dashboard";
@@ -128,12 +128,16 @@ public class MineMuxActivity extends Activity {
     }
 
     private View buildContent() {
+        LinearLayout screen = column();
+        screen.setBackgroundColor(BG);
+
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(BG);
+        screen.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         LinearLayout root = column();
-        root.setPadding(dp(18), dp(18), dp(18), dp(18));
+        root.setPadding(dp(24), dp(22), dp(24), dp(22));
         scroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout header = row();
@@ -148,6 +152,12 @@ public class MineMuxActivity extends Activity {
         TextView cube = text("■", 26, GREEN, true);
         cube.setPadding(0, 0, dp(10), 0);
         brand.addView(cube);
+        cube.setVisibility(View.GONE);
+        TextView cubeBlock = new TextView(this);
+        cubeBlock.setBackground(makeBg(GREEN, 0xff86ff95, 7));
+        LinearLayout.LayoutParams cubeBlockParams = new LinearLayout.LayoutParams(dp(24), dp(24));
+        cubeBlockParams.setMargins(0, 0, dp(10), 0);
+        brand.addView(cubeBlock, cubeBlockParams);
         brand.addView(text("MineMux", 30, TEXT, true));
         titleBlock.addView(text("Phone Minecraft server", 13, MUTED, false));
 
@@ -186,21 +196,17 @@ public class MineMuxActivity extends Activity {
         content = column();
         root.addView(content, matchWrap());
 
-        LinearLayout tabs = row();
-        tabs.setPadding(dp(8), dp(8), dp(8), dp(8));
-        tabs.setBackground(makeBg(0xff0f1a2b, STROKE, 16));
-        root.addView(tabs, matchWrapMargin(0, dp(16), 0, 0));
+        LinearLayout tabs = bottomNav();
         dashboardTab = tabButton("Dashboard", "dashboard");
         serversTab = tabButton("Servers", "servers");
-        backupsTab = tabButton("Backups", "backups");
         settingsTab = tabButton("Settings", "settings");
         tabs.addView(dashboardTab, weightedTabParams());
         tabs.addView(serversTab, weightedTabParams());
-        tabs.addView(backupsTab, weightedTabParams());
         tabs.addView(settingsTab, weightedTabParams());
+        screen.addView(tabs);
 
         setPage("dashboard");
-        return scroll;
+        return screen;
     }
 
     private void setPage(String page) {
@@ -210,8 +216,8 @@ public class MineMuxActivity extends Activity {
         updateTabs();
         if ("setup".equals(page)) buildSetupPage();
         else if ("servers".equals(page)) buildServersPage();
-        else if ("backups".equals(page)) buildBackupsPage();
         else if ("settings".equals(page)) buildSettingsPage();
+        else if ("backups".equals(page)) buildBackupsPage();
         else buildDashboardPage();
         setControllerActionsEnabled(controllerOnline);
     }
@@ -263,8 +269,17 @@ public class MineMuxActivity extends Activity {
             statsA.addView(statCard("Players", playerCountText() + " / " + maxPlayersText(), ACCENT), weightedButtonParams());
             LinearLayout statsB = row();
             content.addView(statsB, matchWrapMargin(0, 0, 0, dp(8)));
+            statsB.addView(statCard("CPU", "Live soon", ACCENT), weightedButtonParams());
             statsB.addView(statCard("RAM", memory.getText().toString(), PURPLE), weightedButtonParams());
-            statsB.addView(statCard("Uptime", uptimeText(), WARNING), weightedButtonParams());
+            LinearLayout statsC = row();
+            content.addView(statsC, matchWrapMargin(0, 0, 0, dp(8)));
+            statsC.addView(statCard("Disk", "Live soon", WARNING), weightedButtonParams());
+            statsC.addView(statCard("Uptime", uptimeText(), GREEN), weightedButtonParams());
+
+            LinearLayout graphs = row();
+            content.addView(graphs, matchWrapMargin(0, 0, 0, dp(8)));
+            graphs.addView(graphCard("TPS live", tpsText() + " / 20", GREEN), weightedButtonParams());
+            graphs.addView(graphCard("Players live", playerCountText() + " / " + maxPlayersText(), ACCENT), weightedButtonParams());
 
             LinearLayout playerActions = row();
             content.addView(playerActions, matchWrapMargin(0, 0, 0, dp(8)));
@@ -661,17 +676,46 @@ public class MineMuxActivity extends Activity {
         LinearLayout info = glassCard();
         info.setPadding(dp(16), dp(16), dp(16), dp(16));
         content.addView(info, matchWrapMargin(0, 0, 0, dp(10)));
-        info.addView(text("MineMux Runtime", 22, TEXT, true));
-        info.addView(summaryLine("Controller", controllerOnline ? "Online" : "Starting"));
+        LinearLayout profile = row();
+        profile.setGravity(Gravity.CENTER_VERTICAL);
+        info.addView(profile, matchWrap());
+        TextView avatar = text("MM", 18, TEXT, true);
+        avatar.setGravity(Gravity.CENTER);
+        avatar.setBackground(makeBg(0xff1d2d46, ACCENT, 28));
+        profile.addView(avatar, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        LinearLayout identity = column();
+        LinearLayout.LayoutParams identityParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        identityParams.setMargins(dp(12), 0, 0, 0);
+        profile.addView(identity, identityParams);
+        identity.addView(text("MineMux Runtime", 22, TEXT, true));
+        identity.addView(text(controllerOnline ? "Controller online" : "Controller starting", 13, controllerOnline ? GREEN : WARNING, false));
         info.addView(summaryLine("Join address", joinAddress.getText().toString()));
+        info.addView(summaryLine("Active server", activeServerInstalled() ? activeServerName() : "None configured"));
         info.addView(summaryLine("Package", "com.termux MVP runtime"));
-        LinearLayout settings = glassCard();
-        settings.setPadding(dp(12), dp(8), dp(12), dp(8));
-        content.addView(settings, matchWrapMargin(0, 0, 0, dp(10)));
-        settings.addView(settingsRow("General", "Runtime defaults and server behavior", ACCENT, null));
-        settings.addView(settingsRow("Storage", "Backups and disk usage", WARNING, () -> setPage("backups")));
-        settings.addView(settingsRow("Terminal", "Open shell recovery", GREEN, () -> startActivity(new Intent(this, TermuxActivity.class))));
-        settings.addView(settingsRow("Power UI", "Open advanced web console", PURPLE, () -> startActivity(new Intent(this, MineMuxWebActivity.class))));
+
+        TextView preferencesTitle = text("Preferences", 13, MUTED, true);
+        preferencesTitle.setPadding(0, dp(6), 0, dp(6));
+        content.addView(preferencesTitle);
+        LinearLayout preferences = glassCard();
+        preferences.setPadding(dp(12), dp(8), dp(12), dp(8));
+        content.addView(preferences, matchWrapMargin(0, 0, 0, dp(10)));
+        preferences.addView(settingsRow("General Settings", "Runtime defaults and server behavior", ACCENT, null));
+        preferences.addView(settingsRow("Storage", "Backups and disk usage", WARNING, () -> setPage("backups")));
+        preferences.addView(settingsRow("Notifications", "Server status alerts are not enabled yet", PURPLE, null));
+
+        TextView advancedTitle = text("Advanced", 13, MUTED, true);
+        advancedTitle.setPadding(0, dp(4), 0, dp(6));
+        content.addView(advancedTitle);
+        LinearLayout advanced = glassCard();
+        advanced.setPadding(dp(12), dp(8), dp(12), dp(8));
+        content.addView(advanced, matchWrapMargin(0, 0, 0, dp(10)));
+        advanced.addView(settingsRow("Terminal", "Open shell recovery", GREEN, () -> startActivity(new Intent(this, TermuxActivity.class))));
+        advanced.addView(settingsRow("Power UI", "Open advanced web console", PURPLE, () -> startActivity(new Intent(this, MineMuxWebActivity.class))));
+
+        TextView footer = text("App Version " + appVersionText() + "\nMineMux MVP", 11, TERTIARY, false);
+        footer.setGravity(Gravity.CENTER);
+        footer.setPadding(0, dp(4), 0, dp(18));
+        content.addView(footer, matchWrap());
     }
 
     private void loadBackups(LinearLayout list) {
@@ -944,7 +988,7 @@ public class MineMuxActivity extends Activity {
     }
 
     private boolean isTabButton(Button button) {
-        return button == dashboardTab || button == serversTab || button == backupsTab || button == settingsTab;
+        return button == dashboardTab || button == serversTab || button == settingsTab;
     }
 
     private boolean activeServerInstalled() {
@@ -1022,10 +1066,17 @@ public class MineMuxActivity extends Activity {
         }
     }
 
+    private String appVersionText() {
+        try {
+            return latestStatus == null ? "MVP" : latestStatus.optString("version", "MVP");
+        } catch (Exception e) {
+            return "MVP";
+        }
+    }
+
     private void updateTabs() {
         styleTab(dashboardTab, "dashboard".equals(currentPage));
         styleTab(serversTab, "servers".equals(currentPage));
-        styleTab(backupsTab, "backups".equals(currentPage));
         styleTab(settingsTab, "settings".equals(currentPage));
     }
 
@@ -1077,7 +1128,9 @@ public class MineMuxActivity extends Activity {
         Button button = new Button(this);
         button.setText(label);
         button.setAllCaps(false);
-        button.setTextSize(13);
+        button.setTextSize(14);
+        button.setMinHeight(0);
+        button.setMinimumHeight(0);
         button.setOnClickListener(v -> setPage(page));
         return button;
     }
@@ -1117,7 +1170,7 @@ public class MineMuxActivity extends Activity {
     private void styleTab(Button button, boolean active) {
         if (button == null) return;
         button.setTextColor(active ? 0xffffffff : MUTED);
-        button.setBackground(makeBg(active ? ACCENT : 0x00000000, active ? 0xff5aa5ff : 0x00000000, 12));
+        button.setBackground(makeBg(active ? ACCENT : 0x00000000, active ? 0xff5aa5ff : 0x00000000, 16));
     }
 
     private LinearLayout column() {
@@ -1130,6 +1183,17 @@ public class MineMuxActivity extends Activity {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.HORIZONTAL);
         return layout;
+    }
+
+    private LinearLayout bottomNav() {
+        LinearLayout tabs = row();
+        tabs.setGravity(Gravity.CENTER);
+        tabs.setPadding(dp(10), dp(10), dp(10), dp(10));
+        tabs.setBackground(makeBg(0xff0f1a2b, STROKE, 24));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(88));
+        params.setMargins(dp(20), dp(8), dp(20), dp(18));
+        tabs.setLayoutParams(params);
+        return tabs;
     }
 
     private LinearLayout card() {
@@ -1168,6 +1232,28 @@ public class MineMuxActivity extends Activity {
         return stat;
     }
 
+    private LinearLayout graphCard(String title, String value, int color) {
+        LinearLayout graph = glassCard();
+        graph.setPadding(dp(12), dp(12), dp(12), dp(12));
+        LinearLayout top = row();
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        graph.addView(top, matchWrap());
+        top.addView(text(title, 12, MUTED, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        top.addView(text(value, 13, color, true));
+
+        int[] widths = new int[]{34, 54, 45, 68, 58, 74, 64};
+        for (int i = 0; i < widths.length; i++) {
+            TextView line = new TextView(this);
+            int lineColor = i % 2 == 0 ? color : 0xff31465f;
+            line.setBackground(makeBg(lineColor, lineColor, 5));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(widths[i]), dp(5));
+            params.setMargins(0, dp(6), 0, 0);
+            graph.addView(line, params);
+        }
+        graph.addView(text("Live history pending", 11, MUTED, false));
+        return graph;
+    }
+
     private LinearLayout activityRow(String title, String subtitle, int color) {
         LinearLayout row = row();
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -1175,6 +1261,12 @@ public class MineMuxActivity extends Activity {
         TextView dot = text("■", 20, color, true);
         dot.setPadding(0, 0, dp(12), 0);
         row.addView(dot);
+        dot.setVisibility(View.GONE);
+        TextView dotBlock = new TextView(this);
+        dotBlock.setBackground(makeBg(color, color, 9));
+        LinearLayout.LayoutParams dotBlockParams = new LinearLayout.LayoutParams(dp(18), dp(18));
+        dotBlockParams.setMargins(0, 0, dp(12), 0);
+        row.addView(dotBlock, dotBlockParams);
         LinearLayout copy = column();
         row.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         copy.addView(text(title, 14, TEXT, true));
