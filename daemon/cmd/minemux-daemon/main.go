@@ -35,6 +35,20 @@ const (
 	maxLogLines     = 600
 )
 
+var fallbackDNSServers = []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"}
+
+var networkClient = &http.Client{
+	Timeout: 120 * time.Second,
+	Transport: &http.Transport{
+		Proxy:               http.ProxyFromEnvironment,
+		DialContext:         mineMuxDialContext,
+		ForceAttemptHTTP2:   true,
+		MaxIdleConns:        10,
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 15 * time.Second,
+	},
+}
+
 type apiError struct {
 	Error string `json:"error"`
 }
@@ -693,6 +707,19 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
 		return
+	}
+	a.server.mu.Lock()
+	a.server.appendLogLocked("Checking Termux DNS resolver")
+	a.server.mu.Unlock()
+	if err := ensureTermuxDNSConfigured(); err != nil {
+		log.Printf("could not update Termux DNS resolver: %v", err)
+		a.server.mu.Lock()
+		a.server.appendLogLocked("Could not update DNS resolver: " + err.Error())
+		a.server.mu.Unlock()
+	} else {
+		a.server.mu.Lock()
+		a.server.appendLogLocked("Termux DNS resolver ready")
+		a.server.mu.Unlock()
 	}
 	javaMajor := detectJavaMajor()
 	if javaMajor <= 0 {
@@ -1397,12 +1424,12 @@ func (a *app) diagnostics() map[string]any {
 
 func (a *app) deviceDiagnostics() map[string]any {
 	return map[string]any{
-		"goos":          runtime.GOOS,
-		"goarch":        runtime.GOARCH,
-		"cpus":          runtime.NumCPU(),
-		"goVersion":     runtime.Version(),
-		"javaVersion":   detectJavaMajor(),
-		"lanIP":         localIP(),
+		"goos":        runtime.GOOS,
+		"goarch":      runtime.GOARCH,
+		"cpus":        runtime.NumCPU(),
+		"goVersion":   runtime.Version(),
+		"javaVersion": detectJavaMajor(),
+		"lanIP":       localIP(),
 		"minemuxHome": a.home,
 	}
 }
@@ -1503,9 +1530,13 @@ func ensureJavaInstalled() error {
 	if detectJavaMajor() > 0 {
 		return nil
 	}
+	if err := ensureTermuxDNSConfigured(); err != nil {
+		log.Printf("could not update Termux DNS resolver before Java install: %v", err)
+	}
 	if _, err := exec.LookPath("pkg"); err != nil {
 		return errors.New("Java is not installed and Termux pkg is unavailable; open Terminal and run: pkg install openjdk-25")
 	}
+	var installErrors []string
 	for _, packageName := range []string{"openjdk-25", "openjdk-21"} {
 		cmd := exec.Command("pkg", "install", "-y", packageName)
 		cmd.Env = cleanJavaEnv(os.Environ())
@@ -1513,9 +1544,32 @@ func ensureJavaInstalled() error {
 		if err == nil && detectJavaMajor() > 0 {
 			return nil
 		}
-		log.Printf("install %s failed: %v %s", packageName, err, strings.TrimSpace(string(out)))
+		detail := strings.TrimSpace(string(out))
+		log.Printf("install %s failed: %v %s", packageName, err, detail)
+		if detail != "" {
+			installErrors = append(installErrors, packageName+": "+lastLines(detail, 8))
+		} else if err != nil {
+			installErrors = append(installErrors, packageName+": "+err.Error())
+		}
+	}
+	if len(installErrors) > 0 {
+		return fmt.Errorf("could not install OpenJDK. MineMux refreshed DNS, but pkg still failed. Last output: %s", strings.Join(installErrors, " | "))
 	}
 	return errors.New("could not install OpenJDK; check network access or run in Terminal: pkg install openjdk-25")
+}
+
+func ensureTermuxDNSConfigured() error {
+	prefix := os.Getenv("PREFIX")
+	if prefix == "" {
+		prefix = "/data/data/com.termux/files/usr"
+	}
+	etcDir := filepath.Join(prefix, "etc")
+	if err := os.MkdirAll(etcDir, 0o755); err != nil {
+		return err
+	}
+	resolvConf := filepath.Join(etcDir, "resolv.conf")
+	content := "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 9.9.9.9\noptions edns0\n"
+	return os.WriteFile(resolvConf, []byte(content), 0o644)
 }
 
 func cleanJavaEnv(env []string) []string {
@@ -1599,9 +1653,9 @@ func downloadFile(sourceURL, targetPath string) error {
 		return err
 	}
 	req.Header.Set("User-Agent", userAgent)
-	res, err := http.DefaultClient.Do(req)
+	res, err := networkClient.Do(req)
 	if err != nil {
-		return err
+		return networkError(sourceURL, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
@@ -1634,9 +1688,9 @@ func getJSON(endpoint string, target any) error {
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	res, err := networkClient.Do(req)
 	if err != nil {
-		return err
+		return networkError(endpoint, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
@@ -1644,6 +1698,63 @@ func getJSON(endpoint string, target any) error {
 		return fmt.Errorf("GET %s failed: %s %s", endpoint, res.Status, strings.TrimSpace(string(body)))
 	}
 	return json.NewDecoder(res.Body).Decode(target)
+}
+
+func mineMuxDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return dialer.DialContext(ctx, network, address)
+	}
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			var lastErr error
+			for _, server := range fallbackDNSServers {
+				conn, err := dialer.DialContext(ctx, "udp", net.JoinHostPort(server, "53"))
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = errors.New("no fallback DNS servers configured")
+			}
+			return nil, lastErr
+		},
+	}
+	ips, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, ip := range ips {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no addresses found for %s", host)
+	}
+	return nil, lastErr
+}
+
+func networkError(endpoint string, err error) error {
+	message := err.Error()
+	if strings.Contains(message, "lookup") || strings.Contains(message, ":53") {
+		return fmt.Errorf("network DNS failed while reaching %s. MineMux uses fallback DNS and also refreshed $PREFIX/etc/resolv.conf; if this still fails, disable private DNS/VPN/ad blocker on the phone and try again. Error: %w", endpoint, err)
+	}
+	return err
+}
+
+func lastLines(text string, limit int) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	if len(lines) <= limit {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[len(lines)-limit:], "\n")
 }
 
 func sha256File(path string) (string, error) {

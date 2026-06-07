@@ -7,12 +7,20 @@ $WebAssets = Join-Path $Assets "webui"
 New-Item -ItemType Directory -Force $Assets | Out-Null
 New-Item -ItemType Directory -Force $WebAssets | Out-Null
 
-if (Get-Command go -ErrorAction SilentlyContinue) {
+$GoCommand = (Get-Command go -ErrorAction SilentlyContinue).Source
+if (-not $GoCommand) {
+    $DefaultGo = "C:\Program Files\Go\bin\go.exe"
+    if (Test-Path $DefaultGo) {
+        $GoCommand = $DefaultGo
+    }
+}
+
+if ($GoCommand) {
     Push-Location (Join-Path $Root "daemon")
     try {
         $env:GOOS = "android"
         $env:GOARCH = "arm64"
-        go build -o (Join-Path $Assets "minemux-daemon") ./cmd/minemux-daemon
+        & $GoCommand build -o (Join-Path $Assets "minemux-daemon") ./cmd/minemux-daemon
     } finally {
         Pop-Location
         Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
