@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MineMux</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #101412;
+        --band: #151b18;
+        --panel: #1b241f;
+        --line: #334238;
+        --text: #edf5ef;
+        --muted: #a8b8ad;
+        --accent: #9de2ad;
+        --accent-strong: #d8f7dd;
+        --danger: #ffb4a8;
+        --warn: #ffdca3;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      main {
+        width: min(1120px, calc(100vw - 24px));
+        margin: 0 auto;
+        padding: 18px 0 28px;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 26px;
+        font-weight: 750;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        margin: 0 0 12px;
+        font-size: 17px;
+        font-weight: 720;
+        letter-spacing: 0;
+      }
+
+      .status-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .tile,
+      section {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .tile {
+        min-height: 76px;
+        padding: 12px;
+      }
+
+      .tile .label {
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 6px;
+      }
+
+      .tile .value {
+        font-size: 18px;
+        line-height: 1.2;
+        font-weight: 720;
+        overflow-wrap: anywhere;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+        gap: 12px;
+        align-items: start;
+      }
+
+      .stack {
+        display: grid;
+        gap: 12px;
+      }
+
+      section {
+        padding: 14px;
+      }
+
+      .toolbar,
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: end;
+      }
+
+      label {
+        display: grid;
+        gap: 5px;
+        min-width: 122px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      input,
+      select {
+        width: 100%;
+        min-height: 38px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #101613;
+        color: var(--text);
+        padding: 0 10px;
+        font: inherit;
+      }
+
+      input[type="checkbox"] {
+        width: 18px;
+        min-height: 18px;
+      }
+
+      .check {
+        min-width: 150px;
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 8px;
+        min-height: 38px;
+      }
+
+      button {
+        min-height: 38px;
+        border: 1px solid #6c8f72;
+        border-radius: 6px;
+        background: var(--accent-strong);
+        color: #102014;
+        padding: 0 13px;
+        font: inherit;
+        font-weight: 700;
+      }
+
+      button.secondary {
+        background: transparent;
+        color: var(--accent-strong);
+      }
+
+      button.danger {
+        border-color: #b86458;
+        background: transparent;
+        color: var(--danger);
+      }
+
+      pre {
+        height: 390px;
+        overflow: auto;
+        margin: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #070a08;
+        color: #dbf1de;
+        padding: 12px;
+        line-height: 1.42;
+        white-space: pre-wrap;
+        font-size: 12px;
+      }
+
+      .list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .item {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px;
+        background: #151d18;
+      }
+
+      .item-title {
+        font-weight: 720;
+        margin-bottom: 4px;
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+
+      .notice {
+        min-height: 24px;
+        color: var(--warn);
+        font-size: 13px;
+      }
+
+      @media (max-width: 820px) {
+        main {
+          width: min(100vw - 16px, 720px);
+          padding-top: 12px;
+        }
+
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .status-grid,
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        label {
+          min-width: min(100%, 180px);
+          flex: 1 1 140px;
+        }
+
+        pre {
+          height: 330px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>MineMux</h1>
+        <div class="toolbar">
+          <button class="secondary" id="refresh">Refresh</button>
+          <button class="secondary" id="diagnostics-export">Export Diagnostics</button>
+        </div>
+      </header>
+
+      <div class="status-grid">
+        <div class="tile">
+          <div class="label">Server</div>
+          <div class="value" id="server-state">Unknown</div>
+        </div>
+        <div class="tile">
+          <div class="label">Join Address</div>
+          <div class="value" id="join-address">-</div>
+        </div>
+        <div class="tile">
+          <div class="label">Version</div>
+          <div class="value" id="mc-version">-</div>
+        </div>
+        <div class="tile">
+          <div class="label">Memory</div>
+          <div class="value" id="memory">-</div>
+        </div>
+      </div>
+
+      <div class="layout">
+        <div class="stack">
+          <section>
+            <h2>Server</h2>
+            <div class="row">
+              <label>
+                Minecraft
+                <input id="setup-version" value="latest-compatible">
+              </label>
+              <label>
+                RAM MB
+                <input id="setup-memory" type="number" min="512" max="8192" step="256" value="2048">
+              </label>
+              <label>
+                Players
+                <input id="setup-players" type="number" min="1" max="50" value="8">
+              </label>
+              <label class="check">
+                <input id="setup-eula" type="checkbox">
+                Accept EULA
+              </label>
+              <button id="setup">Setup Paper</button>
+            </div>
+            <div class="toolbar" style="margin-top: 10px;">
+              <button id="start">Start</button>
+              <button class="secondary" id="stop">Stop</button>
+              <button class="secondary" id="restart">Restart</button>
+            </div>
+          </section>
+
+          <section>
+            <h2>Console</h2>
+            <pre id="logs">Loading logs...</pre>
+            <div class="row" style="margin-top: 10px;">
+              <label style="flex: 1 1 260px;">
+                Command
+                <input id="command" placeholder="list">
+              </label>
+              <button id="send-command">Send</button>
+            </div>
+          </section>
+
+          <section>
+            <h2>Modrinth</h2>
+            <div class="row">
+              <label style="flex: 1 1 220px;">
+                Search
+                <input id="mod-query" value="spark">
+              </label>
+              <button id="mod-search">Search</button>
+            </div>
+            <div class="list" id="mod-results" style="margin-top: 10px;"></div>
+          </section>
+        </div>
+
+        <div class="stack">
+          <section>
+            <h2>Settings</h2>
+            <div class="row">
+              <label>
+                RAM MB
+                <input id="cfg-memory" type="number" min="512" max="8192" step="256">
+              </label>
+              <label>
+                Players
+                <input id="cfg-players" type="number" min="1" max="50">
+              </label>
+              <label>
+                View
+                <input id="cfg-view" type="number" min="2" max="16">
+              </label>
+              <label>
+                Simulation
+                <input id="cfg-sim" type="number" min="2" max="16">
+              </label>
+              <button id="save-config">Save</button>
+            </div>
+          </section>
+
+          <section>
+            <h2>Installed</h2>
+            <div class="list" id="installed-list"></div>
+          </section>
+
+          <section>
+            <h2>Upload Jar</h2>
+            <div class="row">
+              <label style="flex: 1 1 220px;">
+                Jar
+                <input id="jar-file" type="file" accept=".jar">
+              </label>
+              <button id="upload-jar">Upload</button>
+            </div>
+          </section>
+
+          <section>
+            <h2>Backups</h2>
+            <div class="toolbar">
+              <button id="backup-create">Create Backup</button>
+              <button class="secondary" id="rollback">Rollback</button>
+            </div>
+            <div class="list" id="backup-list" style="margin-top: 10px;"></div>
+          </section>
+
+          <section>
+            <h2>Diagnostics</h2>
+            <div class="list" id="diagnostics"></div>
+          </section>
+        </div>
+      </div>
+
+      <p class="notice" id="notice"></p>
+    </main>
+
+    <script>
+      const $ = (id) => document.querySelector(id);
+      const notice = $("#notice");
+      let currentStatus = null;
+
+      function setNotice(text, error = false) {
+        notice.textContent = text || "";
+        notice.style.color = error ? "var(--danger)" : "var(--warn)";
+      }
+
+      async function api(path, options = {}) {
+        const res = await fetch(path, {
+          headers: options.body instanceof FormData ? {} : { "Content-Type": "application/json" },
+          ...options
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || `${res.status} ${res.statusText}`);
+        return body;
+      }
+
+      async function refresh() {
+        try {
+          currentStatus = await api("/api/status");
+          const server = currentStatus.server;
+          const profile = currentStatus.profile;
+          $("#server-state").textContent = server.running ? "Running" : server.installed ? "Stopped" : "Not Set Up";
+          $("#join-address").textContent = server.joinAddress || "-";
+          $("#mc-version").textContent = profile?.minecraftVersion || "-";
+          $("#memory").textContent = profile ? `${profile.memoryMb} MB` : "-";
+          if (profile) {
+            $("#cfg-memory").value = profile.memoryMb;
+            $("#cfg-players").value = profile.maxPlayers;
+            $("#cfg-view").value = profile.viewDistance;
+            $("#cfg-sim").value = profile.simulationDistance;
+          }
+
+          const logs = await api("/api/server/logs");
+          $("#logs").textContent = logs.lines.length ? logs.lines.join("\n") : "No logs yet.";
+          $("#logs").scrollTop = $("#logs").scrollHeight;
+
+          await refreshInstalled();
+          await refreshBackups();
+          await refreshDiagnostics();
+        } catch (err) {
+          setNotice(err.message, true);
+        }
+      }
+
+      async function refreshInstalled() {
+        const data = await api("/api/mods");
+        const list = $("#installed-list");
+        list.innerHTML = "";
+        if (!data.installed || data.installed.length === 0) {
+          list.innerHTML = `<div class="meta">None</div>`;
+          return;
+        }
+        for (const item of data.installed) {
+          const el = document.createElement("div");
+          el.className = "item";
+          el.innerHTML = `
+            <div class="item-title">${escapeHtml(item.name || item.fileName)}</div>
+            <div class="meta">${escapeHtml(item.targetFolder)}/${escapeHtml(item.fileName)}</div>
+            <div class="meta">${escapeHtml(item.source)} · ${escapeHtml(item.phoneSafety || "Unknown")}</div>
+            <div class="toolbar" style="margin-top: 8px;">
+              <button class="danger">Remove</button>
+            </div>
+          `;
+          el.querySelector("button").addEventListener("click", async () => {
+            await api(`/api/mods/uninstall?fileName=${encodeURIComponent(item.fileName)}`, { method: "POST", body: "{}" });
+            setNotice("Removed");
+            await refresh();
+          });
+          list.appendChild(el);
+        }
+      }
+
+      async function refreshBackups() {
+        const data = await api("/api/backups");
+        const list = $("#backup-list");
+        list.innerHTML = "";
+        if (!data.backups || data.backups.length === 0) {
+          list.innerHTML = `<div class="meta">None</div>`;
+          return;
+        }
+        for (const backup of data.backups.slice(0, 6)) {
+          const el = document.createElement("div");
+          el.className = "item";
+          el.innerHTML = `
+            <div class="item-title">${escapeHtml(backup.id)}</div>
+            <div class="meta">${formatBytes(backup.sizeBytes)}</div>
+            <div class="toolbar" style="margin-top: 8px;">
+              <button class="secondary">Restore</button>
+              <button class="danger">Delete</button>
+            </div>
+          `;
+          const buttons = el.querySelectorAll("button");
+          buttons[0].addEventListener("click", async () => {
+            await api(`/api/backups/restore?id=${encodeURIComponent(backup.id)}`, { method: "POST", body: "{}" });
+            setNotice("Backup restored");
+            await refresh();
+          });
+          buttons[1].addEventListener("click", async () => {
+            await api(`/api/backups/${encodeURIComponent(backup.id)}`, { method: "DELETE" });
+            setNotice("Backup deleted");
+            await refresh();
+          });
+          list.appendChild(el);
+        }
+      }
+
+      async function refreshDiagnostics() {
+        const data = await api("/api/diagnostics");
+        $("#diagnostics").innerHTML = `
+          <div class="item">
+            <div class="meta">CPU ${data.device.cpus} · ${escapeHtml(data.device.goarch)}</div>
+            <div class="meta">Java ${data.device.javaVersion || "unknown"} · LAN ${escapeHtml(data.device.lanIP || "-")}</div>
+            <div class="meta">${escapeHtml(data.paths.home)}</div>
+          </div>
+        `;
+      }
+
+      async function post(path, label) {
+        try {
+          setNotice(`${label}...`);
+          await api(path, { method: "POST", body: "{}" });
+          setNotice(`${label} complete`);
+          await refresh();
+        } catch (err) {
+          setNotice(err.message, true);
+        }
+      }
+
+      $("#refresh").addEventListener("click", refresh);
+      $("#start").addEventListener("click", () => post("/api/server/start", "Start"));
+      $("#stop").addEventListener("click", () => post("/api/server/stop", "Stop"));
+      $("#restart").addEventListener("click", () => post("/api/server/restart", "Restart"));
+      $("#backup-create").addEventListener("click", () => post("/api/backups/create", "Backup"));
+      $("#rollback").addEventListener("click", () => post("/api/mods/rollback", "Rollback"));
+
+      $("#setup").addEventListener("click", async () => {
+        try {
+          setNotice("Downloading Paper...");
+          await api("/api/server/setup", {
+            method: "POST",
+            body: JSON.stringify({
+              minecraftVersion: $("#setup-version").value.trim() || "latest-compatible",
+              memoryMb: Number($("#setup-memory").value || 2048),
+              maxPlayers: Number($("#setup-players").value || 8),
+              viewDistance: 6,
+              simulationDistance: 4,
+              acceptEula: $("#setup-eula").checked
+            })
+          });
+          setNotice("Setup complete");
+          await refresh();
+        } catch (err) {
+          setNotice(err.message, true);
+        }
+      });
+
+      $("#save-config").addEventListener("click", async () => {
+        try {
+          await api("/api/config", {
+            method: "POST",
+            body: JSON.stringify({
+              memoryMb: Number($("#cfg-memory").value),
+              maxPlayers: Number($("#cfg-players").value),
+              viewDistance: Number($("#cfg-view").value),
+              simulationDistance: Number($("#cfg-sim").value)
+            })
+          });
+          setNotice("Settings saved");
+          await refresh();
+        } catch (err) {
+          setNotice(err.message, true);
+        }
+      });
+
+      $("#send-command").addEventListener("click", async () => {
+        try {
+          await api("/api/server/command", {
+            method: "POST",
+            body: JSON.stringify({ command: $("#command").value.trim() })
+          });
+          $("#command").value = "";
+          await refresh();
+        } catch (err) {
+          setNotice(err.message, true);
+        }
+      });
+
+      $("#command").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") $("#send-command").click();
+      });
+
+      $("#mod-search").addEventListener("click", async () => {
+        try {
+          setNotice("Searching Modrinth...");
+          const data = await api(`/api/mods/search?query=${encodeURIComponent($("#mod-query").value.trim())}`);
+          const list = $("#mod-results");
+          list.innerHTML = "";
+          if (!data.hits || data.hits.length === 0) {
+            list.innerHTML = `<div class="meta">No compatible results</div>`;
+            return;
+          }
+          for (const hit of data.hits.slice(0, 8)) {
+            const el = document.createElement("div");
+            el.className = "item";
+            el.innerHTML = `
+              <div class="item-title">${escapeHtml(hit.title)}</div>
+              <div class="meta">${escapeHtml(hit.description || "")}</div>
+              <div class="meta">${escapeHtml(hit.slug)} · ${hit.downloads || 0} downloads</div>
+              <div class="toolbar" style="margin-top: 8px;"><button>Install</button></div>
+            `;
+            el.querySelector("button").addEventListener("click", async () => {
+              setNotice(`Installing ${hit.title}...`);
+              await api("/api/mods/install", {
+                method: "POST",
+                body: JSON.stringify({ projectId: hit.project_id })
+              });
+              setNotice("Installed");
+              await refresh();
+            });
+            list.appendChild(el);
+          }
+          setNotice("");
+        } catch (err) {
+          setNotice(err.message, true);
+        }
+      });
+
+      $("#upload-jar").addEventListener("click", async () => {
+        try {
+          const file = $("#jar-file").files[0];
+          if (!file) throw new Error("Choose a jar first");
+          const form = new FormData();
+          form.append("file", file);
+          await api("/api/mods/upload", { method: "POST", body: form });
+          $("#jar-file").value = "";
+          setNotice("Jar uploaded");
+          await refresh();
+        } catch (err) {
+          setNotice(err.message, true);
+        }
+      });
+
+      $("#diagnostics-export").addEventListener("click", async () => {
+        try {
+          const data = await api("/api/diagnostics/export", { method: "POST", body: "{}" });
+          setNotice(`Diagnostics exported: ${data.path}`);
+        } catch (err) {
+          setNotice(err.message, true);
+        }
+      });
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+      }
+
+      function formatBytes(bytes) {
+        if (!bytes) return "0 B";
+        const units = ["B", "KB", "MB", "GB"];
+        let value = bytes;
+        let index = 0;
+        while (value >= 1024 && index < units.length - 1) {
+          value /= 1024;
+          index++;
+        }
+        return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+      }
+
+      refresh();
+      setInterval(refresh, 3000);
+    </script>
+  </body>
+</html>
