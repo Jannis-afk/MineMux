@@ -45,6 +45,7 @@ import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 public class MineMuxActivity extends Activity {
 
@@ -57,7 +58,7 @@ public class MineMuxActivity extends Activity {
     private static final int MUTED = 0xff9aa8bc;
     private static final int TERTIARY = 0xff6f7b8f;
     private static final int ACCENT = 0xff2f86ff;
-    private static final int GREEN = 0xff58df6c;
+    private static final int GREEN = 0xff0db50d;
     private static final int ACCENT_TEXT = 0xffffffff;
     private static final int WARNING = 0xffffc857;
     private static final int ERROR = 0xffff4d5a;
@@ -222,9 +223,9 @@ public class MineMuxActivity extends Activity {
         content = root;
 
         LinearLayout tabs = bottomNav();
-        dashboardTab = tabButton("⌂", "dashboard");
-        serversTab = tabButton("▤", "servers");
-        settingsTab = tabButton("⚙", "settings");
+        dashboardTab = tabButton("⌂\nDashboard", "dashboard");
+        serversTab = tabButton("▤\nServers", "servers");
+        settingsTab = tabButton("⚙\nSettings", "settings");
         tabs.addView(dashboardTab, weightedTabParams());
         tabs.addView(serversTab, weightedTabParams());
         tabs.addView(settingsTab, weightedTabParams());
@@ -247,6 +248,7 @@ public class MineMuxActivity extends Activity {
         else if ("servers".equals(page)) buildServersPage();
         else if ("settings".equals(page)) buildSettingsPage();
         else if ("backups".equals(page)) buildBackupsPage();
+        else if ("mods".equals(page)) buildModsPage();
         else buildDashboardPage();
         setControllerActionsEnabled(controllerOnline);
     }
@@ -254,28 +256,33 @@ public class MineMuxActivity extends Activity {
     private void buildScreenChrome(String page) {
         LinearLayout header = row();
         header.setGravity(Gravity.CENTER_VERTICAL);
-        content.addView(header, matchWrap());
+        content.addView(header, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(70)));
 
-        LinearLayout titleBlock = column();
-        header.addView(titleBlock, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         LinearLayout brand = row();
         brand.setGravity(Gravity.CENTER_VERTICAL);
-        titleBlock.addView(brand);
+        header.addView(brand, "servers".equals(page) ? new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1) : new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         TextView cubeBlock = new TextView(this);
-        cubeBlock.setBackground(makeBg(GREEN, 0xff86ff95, 7));
-        LinearLayout.LayoutParams cubeBlockParams = new LinearLayout.LayoutParams(dp(24), dp(24));
-        cubeBlockParams.setMargins(0, 0, dp(10), 0);
+        cubeBlock.setBackground(voxelBg());
+        LinearLayout.LayoutParams cubeBlockParams = new LinearLayout.LayoutParams(dp(36), dp(36));
+        cubeBlockParams.setMargins(0, 0, dp(12), 0);
         brand.addView(cubeBlock, cubeBlockParams);
-        brand.addView(text(screenBrand(page), 30, TEXT, true));
-        titleBlock.addView(text(screenSubtitle(page), 13, MUTED, false));
+        brand.addView(text(screenBrand(page), "servers".equals(page) ? 21 : 28, TEXT, true));
+
+        if ("servers".equals(page)) {
+            TextView center = text("Servers", 24, TEXT, true);
+            center.setGravity(Gravity.CENTER);
+            header.addView(center, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        }
 
         TextView avatar = text("MM", 13, TEXT, true);
         avatar.setGravity(Gravity.CENTER);
-        avatar.setBackground(makeBg(0xff1d2d46, controllerOnline ? GREEN : STROKE, 24));
+        avatar.setBackground(makeBg(0xff1d2d46, controllerOnline ? GREEN : 0xff657187, 24));
         header.addView(avatar, new LinearLayout.LayoutParams(dp(48), dp(48)));
 
-        notice = text("Starting local controller...", 14, WARNING, false);
-        notice.setPadding(0, dp(14), 0, dp(10));
+        notice = text(controllerOnline ? "" : "Starting local controller...", 13, WARNING, false);
+        notice.setPadding(dp(12), dp(8), dp(12), dp(8));
+        notice.setBackground(makeBg(0xff121d2d, STROKE, 14));
+        notice.setVisibility(controllerOnline ? View.GONE : View.VISIBLE);
         content.addView(notice);
 
         globalProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
@@ -295,13 +302,15 @@ public class MineMuxActivity extends Activity {
         operationPanel.addView(operationDetail);
 
         pageTitle = text(screenTitle(page), 28, TEXT, true);
-        pageTitle.setPadding(0, dp(6), 0, dp(8));
-        content.addView(pageTitle);
+        if (!"dashboard".equals(page) && !"servers".equals(page) && !"settings".equals(page)) {
+            pageTitle.setPadding(0, dp(6), 0, dp(8));
+            content.addView(pageTitle);
+        }
     }
 
     private String screenBrand(String page) {
         if ("settings".equals(page)) return "Settings";
-        return "MineMux";
+        return "Mc Phone";
     }
 
     private String screenTitle(String page) {
@@ -309,6 +318,7 @@ public class MineMuxActivity extends Activity {
         if ("settings".equals(page)) return "Settings";
         if ("setup".equals(page)) return "Setup Server";
         if ("backups".equals(page)) return "Backups";
+        if ("mods".equals(page)) return "Mods";
         return "Dashboard";
     }
 
@@ -317,6 +327,7 @@ public class MineMuxActivity extends Activity {
         if ("settings".equals(page)) return "Profile, preferences, and advanced tools";
         if ("setup".equals(page)) return "Guided Android-first server setup";
         if ("backups".equals(page)) return "Restore points and rollback";
+        if ("mods".equals(page)) return "Install plugins and server mods";
         return "Phone Minecraft server";
     }
 
@@ -324,10 +335,10 @@ public class MineMuxActivity extends Activity {
         pageTitle.setText("Dashboard");
         if (latestStatus == null || !activeServerInstalled()) {
             LinearLayout empty = glassCard();
-            empty.setPadding(dp(18), dp(22), dp(18), dp(22));
-            content.addView(empty, matchWrapMargin(0, dp(8), 0, dp(10)));
-            empty.addView(text("No server configured", 24, TEXT, true));
-            empty.addView(text("Create a phone-hosted server with a guided setup. Pick runtime, version, memory, and player limit before MineMux downloads anything.", 14, MUTED, false));
+            empty.setPadding(dp(24), dp(24), dp(24), dp(24));
+            content.addView(empty, matchWrapMargin(0, dp(18), 0, dp(16)));
+            empty.addView(text("No server configured", 26, TEXT, true));
+            empty.addView(text("Create a phone-hosted server with a guided setup. Pick runtime, version, memory, and player limit before MineMux downloads anything.", 15, MUTED, false));
             Button setup = primaryButton("Set Up Server");
             setup.setOnClickListener(v -> {
                 setupStep = 0;
@@ -336,51 +347,60 @@ public class MineMuxActivity extends Activity {
             empty.addView(setup, fullWidthButtonParams());
         } else {
             LinearLayout live = glassCard();
-            live.setPadding(dp(18), dp(18), dp(18), dp(18));
-            content.addView(live, matchWrapMargin(0, dp(8), 0, dp(10)));
+            live.setPadding(dp(24), dp(24), dp(24), dp(24));
+            content.addView(live, matchWrapMargin(0, dp(18), 0, dp(18)));
             LinearLayout titleRow = row();
-            titleRow.setGravity(Gravity.CENTER_VERTICAL);
+            titleRow.setGravity(Gravity.TOP);
             live.addView(titleRow, matchWrap());
+            titleRow.addView(thumbnail("overworld"), new LinearLayout.LayoutParams(dp(86), dp(78)));
             LinearLayout titleTexts = column();
-            titleRow.addView(titleTexts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            titleTexts.addView(text(activeServerName(), 25, TEXT, true));
-            titleTexts.addView(text(joinAddressText(), 15, MUTED, false));
-            titleRow.addView(statusPill(activeServerRunning() ? "Running" : "Ready", activeServerRunning() ? GREEN : MUTED));
-            live.addView(text("Minecraft " + versionText() + "  /  " + activeLoader() + "  /  " + memoryText(), 14, MUTED, false));
+            LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            titleParams.setMargins(dp(18), 0, 0, 0);
+            titleRow.addView(titleTexts, titleParams);
+            LinearLayout nameRow = row();
+            nameRow.setGravity(Gravity.CENTER_VERTICAL);
+            titleTexts.addView(nameRow, matchWrap());
+            nameRow.addView(text(activeServerName(), 28, TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            nameRow.addView(statusPill(activeServerRunning() ? "Running" : "Ready", activeServerRunning() ? GREEN : MUTED));
+            titleTexts.addView(text(joinAddressText(), 16, MUTED, false));
+            TextView versionLine = text("Minecraft " + versionText() + "  .  " + activeLoaderLabel(), 15, MUTED, false);
+            versionLine.setPadding(0, dp(10), 0, 0);
+            titleTexts.addView(versionLine);
 
             LinearLayout controls = row();
-            live.addView(controls, matchWrapMargin(0, dp(14), 0, 0));
-            Button start = activeServerRunning() ? dangerButton("Stop") : primaryButton("Start");
+            live.addView(controls, matchWrapMargin(0, dp(22), 0, 0));
+            Button start = activeServerRunning() ? dangerButton("■ Stop") : primaryButton("▶ Start");
             if (activeServerRunning()) start.setOnClickListener(v -> actionButton(start, "/api/server/stop", "{}", "Stopping server..."));
             else start.setOnClickListener(v -> actionButton(start, "/api/server/start", "{}", "Starting server..."));
             controls.addView(start, weightedButtonParams());
-            Button restart = secondaryButton("Restart");
+            Button restart = secondaryButton("↻ Restart");
             restart.setOnClickListener(v -> actionButton(restart, "/api/server/restart", "{}", "Restarting server..."));
             controls.addView(restart, weightedButtonParams());
-            Button backup = secondaryButton("Backup");
+            Button backup = secondaryButton("▣ Backup");
             backup.setOnClickListener(v -> actionButton(backup, "/api/backups/create", "{}", "Creating backup..."));
             controls.addView(backup, weightedButtonParams());
+            Button details = secondaryButton("ⓘ Details");
+            details.setOnClickListener(v -> setPage("servers"));
+            controls.addView(details, weightedButtonParams());
 
             LinearLayout statsA = row();
-            content.addView(statsA, matchWrapMargin(0, 0, 0, dp(8)));
+            live.addView(statsA, matchWrapMargin(0, dp(22), 0, dp(10)));
             statsA.addView(statCard("TPS", tpsText() + " / 20", GREEN), weightedButtonParams());
             statsA.addView(statCard("Players", playerCountText() + " / " + maxPlayersText(), ACCENT), weightedButtonParams());
+            statsA.addView(statCard("CPU", cpuText(), 0xff4dbbff), weightedButtonParams());
             LinearLayout statsB = row();
-            content.addView(statsB, matchWrapMargin(0, 0, 0, dp(8)));
-            statsB.addView(statCard("CPU", cpuText(), ACCENT), weightedButtonParams());
+            live.addView(statsB, matchWrapMargin(0, 0, 0, dp(10)));
             statsB.addView(statCard("RAM", ramText(), PURPLE), weightedButtonParams());
-            LinearLayout statsC = row();
-            content.addView(statsC, matchWrapMargin(0, 0, 0, dp(8)));
-            statsC.addView(statCard("Disk", diskText(), WARNING), weightedButtonParams());
-            statsC.addView(statCard("Uptime", uptimeText(), GREEN), weightedButtonParams());
+            statsB.addView(statCard("Disk", diskText(), WARNING), weightedButtonParams());
+            statsB.addView(statCard("Uptime", uptimeText(), MUTED), weightedButtonParams());
 
             LinearLayout graphs = row();
-            content.addView(graphs, matchWrapMargin(0, 0, 0, dp(8)));
-            graphs.addView(graphCard("TPS live", tpsText() + " / 20", GREEN), weightedButtonParams());
-            graphs.addView(graphCard("Players live", playerCountText() + " / " + maxPlayersText(), ACCENT), weightedButtonParams());
+            live.addView(graphs, matchWrapMargin(0, dp(12), 0, 0));
+            graphs.addView(graphCard("TPS (Live)", tpsText(), GREEN), weightedButtonParams());
+            graphs.addView(graphCard("Players (Live)", playerCountText() + " / " + maxPlayersText(), ACCENT), weightedButtonParams());
 
             LinearLayout playerActions = row();
-            content.addView(playerActions, matchWrapMargin(0, 0, 0, dp(8)));
+            live.addView(playerActions, matchWrapMargin(0, dp(12), 0, 0));
             Button listPlayers = secondaryButton("List Players");
             listPlayers.setOnClickListener(v -> actionButton(listPlayers, "/api/server/command", "{\"command\":\"list\"}", "Asking server for player list..."));
             playerActions.addView(listPlayers, weightedButtonParams());
@@ -390,30 +410,24 @@ public class MineMuxActivity extends Activity {
         }
 
         LinearLayout activity = glassCard();
-        activity.setPadding(dp(16), dp(14), dp(16), dp(14));
-        content.addView(activity, matchWrapMargin(0, dp(8), 0, dp(10)));
+        activity.setPadding(dp(24), dp(20), dp(24), dp(20));
+        content.addView(activity, matchWrapMargin(0, 0, 0, dp(18)));
         LinearLayout activityHeader = row();
         activityHeader.setGravity(Gravity.CENTER_VERTICAL);
         activity.addView(activityHeader, matchWrap());
-        activityHeader.addView(text("Recent Activity", 18, TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        TextView viewBackups = text("View backups", 13, ACCENT, true);
+        activityHeader.addView(text("Recent Activity", 22, TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView viewBackups = text("View all >", 15, ACCENT, true);
         viewBackups.setOnClickListener(v -> setPage("backups"));
         activityHeader.addView(viewBackups);
-        activity.addView(activityRow("Backup", "Create restore points before experimenting", GREEN));
-        activity.addView(activityRow("Runtime", "Use Settings for Terminal and Power UI", ACCENT));
+        activity.addView(activityRow("Controller " + (controllerOnline ? "online" : "starting"), "MineMux local daemon", controllerOnline ? GREEN : WARNING));
+        activity.addView(activityRow("Active server", activeServerInstalled() ? activeServerName() : "No server configured", ACCENT));
+        activity.addView(activityRow("Backups", "Open restore points and rollback tools", PURPLE));
         logs = text("No logs yet.", 12, 0xffd9e7ff, false);
         logs.setTypeface(Typeface.MONOSPACE);
         logs.setBackground(makeBg(0xff08111f, STROKE, 10));
         logs.setPadding(dp(10), dp(10), dp(10), dp(10));
-        activity.addView(logs, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150)));
+        activity.addView(logs, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(120)));
         refreshLogs();
-
-        TextView serversTitle = text("Servers", 17, TEXT, true);
-        serversTitle.setPadding(0, dp(6), 0, dp(8));
-        content.addView(serversTitle);
-        LinearLayout serverList = column();
-        content.addView(serverList, matchWrapMargin(0, 0, 0, dp(10)));
-        loadServers(serverList);
     }
 
     private void buildSetupPage() {
@@ -592,17 +606,142 @@ public class MineMuxActivity extends Activity {
 
     private void buildServersPage() {
         pageTitle.setText("Servers");
-        Button create = primaryButton("Create New Server");
-        create.setOnClickListener(v -> {
-            setupStep = 0;
-            wizardServerId = "server-" + System.currentTimeMillis() / 1000;
-            wizardServerName = "New Server";
-            setPage("setup");
-        });
-        content.addView(create, fullWidthButtonParams());
         LinearLayout list = column();
-        content.addView(list, matchWrapMargin(0, dp(10), 0, 0));
-        loadServers(list);
+        content.addView(list, matchWrapMargin(0, dp(14), 0, dp(8)));
+        LinearLayout countRow = row();
+        countRow.setGravity(Gravity.CENTER);
+        content.addView(countRow, matchWrapMargin(0, 0, 0, dp(10)));
+        LinearLayout detail = column();
+        content.addView(detail, matchWrap());
+        loadServersPage(list, countRow, detail);
+    }
+
+    private void loadServersPage(LinearLayout list, LinearLayout countRow, LinearLayout detail) {
+        list.removeAllViews();
+        detail.removeAllViews();
+        getJson("/api/servers", body -> {
+            try {
+                JSONArray servers = new JSONObject(body).optJSONArray("servers");
+                if (servers == null || servers.length() == 0) {
+                    list.addView(emptyState("No server profiles yet. Create one in Setup."));
+                    Button create = primaryButton("Create New Server");
+                    create.setOnClickListener(v -> {
+                        setupStep = 0;
+                        wizardServerId = "server-" + System.currentTimeMillis() / 1000;
+                        wizardServerName = "New Server";
+                        setPage("setup");
+                    });
+                    detail.addView(create, fullWidthButtonParams());
+                    return;
+                }
+                JSONObject selected = servers.getJSONObject(0);
+                for (int i = 0; i < servers.length(); i++) {
+                    JSONObject server = servers.getJSONObject(i);
+                    if (server.optBoolean("active")) selected = server;
+                }
+                for (int i = 0; i < servers.length(); i++) {
+                    JSONObject server = servers.getJSONObject(i);
+                    boolean isSelected = server.optString("id").equals(selected.optString("id"));
+                    list.addView(serverListRow(server, isSelected, detail));
+                }
+                countRow.removeAllViews();
+                countRow.addView(text(servers.length() + (servers.length() == 1 ? " server" : " servers"), 14, MUTED, false));
+                renderServerDetail(detail, selected);
+            } catch (Exception e) {
+                list.addView(emptyState(e.getMessage()));
+            }
+        }, error -> list.addView(emptyState(error)));
+    }
+
+    private View serverListRow(JSONObject server, boolean selected, LinearLayout detail) {
+        LinearLayout row = row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(8), dp(12), dp(8));
+        row.setBackground(makeBg(0xff101a2a, selected ? ACCENT : STROKE, 16));
+        row.setLayoutParams(matchWrapMargin(0, 0, 0, dp(10)));
+        row.addView(thumbnail(server.optBoolean("running") ? "overworld" : "cave"), new LinearLayout.LayoutParams(dp(76), dp(58)));
+
+        JSONObject profile = server.optJSONObject("profile");
+        LinearLayout copy = column();
+        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        copyParams.setMargins(dp(14), 0, dp(8), 0);
+        row.addView(copy, copyParams);
+        copy.addView(text(server.optString("name", server.optString("id", "Server")), 20, TEXT, true));
+        String mc = profile == null ? "-" : profile.optString("minecraftVersion", "-");
+        String loader = profile == null ? "-" : profile.optString("loader", "-");
+        copy.addView(text("Minecraft " + mc + "  .  " + loader, 14, MUTED, false));
+        row.addView(statusPill(server.optBoolean("running") ? "Running" : server.optBoolean("installed") ? "Ready" : "Offline", server.optBoolean("running") ? GREEN : server.optBoolean("installed") ? MUTED : ERROR));
+        row.addView(text(">", 22, MUTED, true));
+        row.setOnClickListener(v -> renderServerDetail(detail, server));
+        return row;
+    }
+
+    private void renderServerDetail(LinearLayout parent, JSONObject server) {
+        parent.removeAllViews();
+        LinearLayout detail = glassCard();
+        detail.setPadding(dp(22), dp(20), dp(22), dp(20));
+        parent.addView(detail, matchWrapMargin(0, 0, 0, dp(18)));
+
+        JSONObject profile = server.optJSONObject("profile");
+        LinearLayout top = row();
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        detail.addView(top, matchWrap());
+        top.addView(thumbnail("overworld"), new LinearLayout.LayoutParams(dp(78), dp(58)));
+        LinearLayout copy = column();
+        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        copyParams.setMargins(dp(14), 0, dp(10), 0);
+        top.addView(copy, copyParams);
+        copy.addView(text(server.optString("name", "Server"), 26, TEXT, true));
+        copy.addView(text((server.optBoolean("running") ? "● Running" : "● Ready"), 16, server.optBoolean("running") ? GREEN : MUTED, true));
+        copy.addView(text(server.optString("joinAddress", joinAddressText()), 14, MUTED, false));
+        LinearLayout players = column();
+        top.addView(players, new LinearLayout.LayoutParams(dp(96), ViewGroup.LayoutParams.WRAP_CONTENT));
+        players.addView(text("Players", 13, MUTED, false));
+        players.addView(text(playerCountText() + " / " + (profile == null ? "-" : profile.optInt("maxPlayers", 0)), 24, TEXT, true));
+        players.addView(progressBar(GREEN, playerProgressPercent(profile)));
+
+        LinearLayout info = row();
+        info.setPadding(0, dp(16), 0, dp(14));
+        detail.addView(info, matchWrap());
+        info.addView(infoCell("Version", profile == null ? "-" : profile.optString("minecraftVersion", "-")), weightedButtonParams());
+        info.addView(infoCell("Software", profile == null ? "-" : profile.optString("loader", "-")), weightedButtonParams());
+        info.addView(infoCell("Type", profile == null ? "-" : profile.optString("serverType", "Survival")), weightedButtonParams());
+        info.addView(infoCell("Uptime", uptimeText()), weightedButtonParams());
+
+        LinearLayout actionsA = row();
+        detail.addView(actionsA, matchWrapMargin(0, 0, 0, dp(8)));
+        Button stop = server.optBoolean("running") ? dangerButton("■ Stop") : primaryButton("▶ Start");
+        stop.setOnClickListener(v -> actionButton(stop, server.optBoolean("running") ? "/api/server/stop" : "/api/server/start", "{}", server.optBoolean("running") ? "Stopping server..." : "Starting server..."));
+        actionsA.addView(stop, weightedButtonParams());
+        Button restart = secondaryButton("↻ Restart");
+        restart.setOnClickListener(v -> actionButton(restart, "/api/server/restart", "{}", "Restarting server..."));
+        actionsA.addView(restart, weightedButtonParams());
+        Button backups = secondaryButton("▣ Backups");
+        backups.setOnClickListener(v -> setPage("backups"));
+        actionsA.addView(backups, weightedButtonParams());
+
+        LinearLayout actionsB = row();
+        detail.addView(actionsB, matchWrapMargin(0, 0, 0, dp(10)));
+        Button mods = secondaryButton("✚ Mods");
+        mods.setOnClickListener(v -> setPage("mods"));
+        actionsB.addView(mods, weightedButtonParams());
+        actionsB.addView(secondaryButton("⇧ JAR"), weightedButtonParams());
+        actionsB.addView(secondaryButton("⬡ Modrinth"), weightedButtonParams());
+
+        LinearLayout backupsCard = sectionCard("Backups", "View all >", () -> setPage("backups"));
+        detail.addView(backupsCard, matchWrapMargin(0, dp(4), 0, dp(10)));
+        LinearLayout backupRows = column();
+        backupsCard.addView(backupRows, matchWrap());
+        loadBackups(backupRows);
+
+        LinearLayout settings = sectionCard("Server Settings", "", null);
+        detail.addView(settings, matchWrap());
+        CheckBox restartCrash = settingCheckBox("Auto-restart on crash", "Restart the server automatically if it crashes.", profileFeatureBool("restartOnCrash", true));
+        settings.addView(restartCrash, matchWrap());
+        restartCrash.setOnCheckedChangeListener((button, checked) -> postJson("/api/config", "{\"restartOnCrash\":" + checked + "}", "Saving restart setting...", () -> setNotice("Restart setting saved.", false)));
+        CheckBox autoStart = settingCheckBox("Start on boot", "Start the active server when MineMux daemon starts.", profileFeatureBool("autoStart", false));
+        settings.addView(autoStart, matchWrap());
+        autoStart.setOnCheckedChangeListener((button, checked) -> postJson("/api/config", "{\"autoStart\":" + checked + "}", "Saving start setting...", () -> setNotice("Start setting saved.", false)));
     }
 
     private View serverRow(JSONObject server) {
@@ -771,47 +910,59 @@ public class MineMuxActivity extends Activity {
 
     private void buildSettingsPage() {
         pageTitle.setText("Settings");
-        LinearLayout info = glassCard();
-        info.setPadding(dp(16), dp(16), dp(16), dp(16));
-        content.addView(info, matchWrapMargin(0, 0, 0, dp(10)));
-        LinearLayout profile = row();
-        profile.setGravity(Gravity.CENTER_VERTICAL);
-        info.addView(profile, matchWrap());
-        TextView avatar = text("MM", 18, TEXT, true);
+        LinearLayout profile = glassCard();
+        profile.setPadding(dp(24), dp(22), dp(24), dp(22));
+        content.addView(profile, matchWrapMargin(0, dp(18), 0, dp(18)));
+        LinearLayout profileTop = row();
+        profileTop.setGravity(Gravity.CENTER_VERTICAL);
+        profile.addView(profileTop, matchWrap());
+        TextView avatar = text("MP", 24, TEXT, true);
         avatar.setGravity(Gravity.CENTER);
-        avatar.setBackground(makeBg(0xff1d2d46, ACCENT, 28));
-        profile.addView(avatar, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        avatar.setBackground(makeBg(0xff1d2d46, ACCENT, 36));
+        profileTop.addView(avatar, new LinearLayout.LayoutParams(dp(72), dp(72)));
         LinearLayout identity = column();
         LinearLayout.LayoutParams identityParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-        identityParams.setMargins(dp(12), 0, 0, 0);
-        profile.addView(identity, identityParams);
-        identity.addView(text("MineMux Runtime", 22, TEXT, true));
-        identity.addView(text(controllerOnline ? "Controller online" : "Controller starting", 13, controllerOnline ? GREEN : WARNING, false));
-        info.addView(summaryLine("Join address", joinAddressText()));
-        info.addView(summaryLine("Active server", activeServerInstalled() ? activeServerName() : "None configured"));
-        info.addView(summaryLine("Package", "com.termux MVP runtime"));
+        identityParams.setMargins(dp(18), 0, dp(10), 0);
+        profileTop.addView(identity, identityParams);
+        identity.addView(text("Mc Phone", 26, TEXT, true));
+        identity.addView(text("mcphone@example.com", 15, MUTED, false));
+        LinearLayout plan = row();
+        plan.setGravity(Gravity.CENTER_VERTICAL);
+        identity.addView(plan, matchWrapMargin(0, dp(8), 0, 0));
+        plan.addView(statusPill("Pro Plan", GREEN));
+        TextView active = text("  . Active", 14, GREEN, true);
+        plan.addView(active);
+        profileTop.addView(secondaryButton("Edit"));
 
-        TextView preferencesTitle = text("Preferences", 13, MUTED, true);
-        preferencesTitle.setPadding(0, dp(6), 0, dp(6));
+        LinearLayout stats = row();
+        profile.addView(stats, matchWrapMargin(0, dp(22), 0, 0));
+        stats.addView(profileStat("▤", activeServerInstalled() ? "1" : "0", "Servers", ACCENT), weightedButtonParams());
+        stats.addView(profileStat("↺", "-", "Backups", GREEN), weightedButtonParams());
+        stats.addView(profileStat("▣", diskText(), "Storage Used", PURPLE), weightedButtonParams());
+        stats.addView(profileStat("□", "Pro", "Plan", ACCENT), weightedButtonParams());
+
+        LinearLayout general = settingRowIcon("⚙", "General Settings", "Configure general app preferences", ACCENT, null);
+        content.addView(general, matchWrapMargin(0, 0, 0, dp(18)));
+
+        TextView preferencesTitle = text("Preferences", 17, MUTED, true);
+        preferencesTitle.setPadding(dp(2), 0, 0, dp(10));
         content.addView(preferencesTitle);
-        LinearLayout preferences = glassCard();
-        preferences.setPadding(dp(12), dp(8), dp(12), dp(8));
-        content.addView(preferences, matchWrapMargin(0, 0, 0, dp(10)));
-        CheckBox autoStart = settingCheckBox("Start on boot", "Start the active server when MineMux daemon starts.", profileFeatureBool("autoStart", false));
-        preferences.addView(autoStart, matchWrapMargin(0, dp(4), 0, dp(4)));
-        autoStart.setOnCheckedChangeListener((button, checked) -> postJson("/api/config", "{\"autoStart\":" + checked + "}", "Saving start setting...", () -> setNotice("Start setting saved.", false)));
-        CheckBox restartCrash = settingCheckBox("Auto-restart on crash", "Restart the server automatically after a crash.", profileFeatureBool("restartOnCrash", true));
-        preferences.addView(restartCrash, matchWrapMargin(0, dp(4), 0, dp(4)));
-        restartCrash.setOnCheckedChangeListener((button, checked) -> postJson("/api/config", "{\"restartOnCrash\":" + checked + "}", "Saving restart setting...", () -> setNotice("Restart setting saved.", false)));
-        preferences.addView(settingsRow("Storage", "Backups and disk usage", WARNING, () -> setPage("backups")));
-        preferences.addView(settingsRow("Notifications", "Server status alerts are not enabled yet", PURPLE, null));
+        LinearLayout preferences = sectionCard("", "", null);
+        content.addView(preferences, matchWrapMargin(0, 0, 0, dp(18)));
+        preferences.addView(toggleSettingRow("●", "Notifications", "Manage push notifications", WARNING, true, null));
+        preferences.addView(toggleSettingRow("◐", "Appearance", "Dark Mode", PURPLE, true, null));
+        preferences.addView(toggleSettingRow("▶", "Start on boot", "Start active server when daemon starts", GREEN, profileFeatureBool("autoStart", false),
+            checked -> postJson("/api/config", "{\"autoStart\":" + checked + "}", "Saving start setting...", () -> setNotice("Start setting saved.", false))));
+        preferences.addView(toggleSettingRow("↻", "Auto-restart", "Restart server automatically after crash", ACCENT, profileFeatureBool("restartOnCrash", true),
+            checked -> postJson("/api/config", "{\"restartOnCrash\":" + checked + "}", "Saving restart setting...", () -> setNotice("Restart setting saved.", false))));
+        preferences.addView(settingRowIcon("▰", "Storage", "Manage backups and disk usage", WARNING, () -> setPage("backups")));
+        preferences.addView(settingRowIcon("✚", "Integrations", "Modrinth, GitHub, Discord", 0xff4ddde4, null));
 
-        TextView serverTitle = text("Server Defaults", 13, MUTED, true);
-        serverTitle.setPadding(0, dp(4), 0, dp(6));
+        TextView serverTitle = text("Server Defaults", 17, MUTED, true);
+        serverTitle.setPadding(dp(2), 0, 0, dp(10));
         content.addView(serverTitle);
-        LinearLayout defaults = glassCard();
-        defaults.setPadding(dp(12), dp(12), dp(12), dp(12));
-        content.addView(defaults, matchWrapMargin(0, 0, 0, dp(10)));
+        LinearLayout defaults = sectionCard("", "", null);
+        content.addView(defaults, matchWrapMargin(0, 0, 0, dp(18)));
         EditText memoryInput = input(String.valueOf(profileInt("memoryMb", wizardMemory)));
         addField(defaults, "Memory MB", memoryInput);
         EditText playersInput = input(String.valueOf(profileInt("maxPlayers", wizardPlayers)));
@@ -824,16 +975,17 @@ public class MineMuxActivity extends Activity {
         });
         defaults.addView(saveDefaults, fullWidthButtonParams());
 
-        TextView advancedTitle = text("Advanced", 13, MUTED, true);
-        advancedTitle.setPadding(0, dp(4), 0, dp(6));
-        content.addView(advancedTitle);
-        LinearLayout advanced = glassCard();
-        advanced.setPadding(dp(12), dp(8), dp(12), dp(8));
-        content.addView(advanced, matchWrapMargin(0, 0, 0, dp(10)));
-        advanced.addView(settingsRow("Terminal", "Open shell recovery", GREEN, () -> startActivity(new Intent(this, TermuxActivity.class))));
-        advanced.addView(settingsRow("Power UI", "Open advanced web console", PURPLE, () -> startActivity(new Intent(this, MineMuxWebActivity.class))));
+        TextView accountTitle = text("Account", 17, MUTED, true);
+        accountTitle.setPadding(dp(2), 0, 0, dp(10));
+        content.addView(accountTitle);
+        LinearLayout account = sectionCard("", "", null);
+        content.addView(account, matchWrapMargin(0, 0, 0, dp(14)));
+        account.addView(settingRowIcon("⌁", "Linked Accounts", "Manage connected accounts", ACCENT, null));
+        account.addView(settingRowIcon("↪", "Sign Out", "Sign out of your account", ERROR, null));
+        account.addView(settingRowIcon("⌘", "Terminal", "Open shell recovery", GREEN, () -> startActivity(new Intent(this, TermuxActivity.class))));
+        account.addView(settingRowIcon("▣", "Power UI", "Open advanced web console", PURPLE, () -> startActivity(new Intent(this, MineMuxWebActivity.class))));
 
-        TextView footer = text("App Version " + appVersionText() + "\nMineMux MVP", 11, TERTIARY, false);
+        TextView footer = text("App Version " + appVersionText() + "\n© 2024 Mc Phone. All rights reserved.", 11, TERTIARY, false);
         footer.setGravity(Gravity.CENTER);
         footer.setPadding(0, dp(4), 0, dp(18));
         content.addView(footer, matchWrap());
@@ -1087,6 +1239,7 @@ public class MineMuxActivity extends Activity {
         if (notice == null) return;
         notice.setText(value == null || value.isEmpty() ? "Ready" : value);
         notice.setTextColor(error ? ERROR : WARNING);
+        notice.setVisibility(value == null || value.isEmpty() || "Ready".equals(value) ? View.GONE : View.VISIBLE);
         if (error && value != null && !value.isEmpty()) Toast.makeText(this, value, Toast.LENGTH_SHORT).show();
     }
 
@@ -1339,7 +1492,8 @@ public class MineMuxActivity extends Activity {
         button.setText(label);
         button.setContentDescription(screenTitle(page));
         button.setAllCaps(false);
-        button.setTextSize(24);
+        button.setTextSize(13);
+        button.setGravity(Gravity.CENTER);
         button.setMinHeight(0);
         button.setMinimumHeight(0);
         button.setOnClickListener(v -> setPage(page));
@@ -1484,6 +1638,141 @@ public class MineMuxActivity extends Activity {
         copy.addView(text(subtitle, 12, MUTED, false));
         row.addView(text(">", 18, MUTED, true));
         return row;
+    }
+
+    private GradientDrawable voxelBg() {
+        GradientDrawable drawable = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xff49db32, 0xff0db50d, 0xff8b5a2b, 0xff5b321a});
+        drawable.setCornerRadius(dp(8));
+        return drawable;
+    }
+
+    private TextView thumbnail(String kind) {
+        int[] colors;
+        if ("cave".equals(kind)) colors = new int[]{0xff4b3a2b, 0xff11151c};
+        else if ("nether".equals(kind)) colors = new int[]{0xff572979, 0xff1d0e2e};
+        else colors = new int[]{0xffd1e7ff, 0xff2c7a3d, 0xff225f31};
+        TextView view = new TextView(this);
+        GradientDrawable drawable = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, colors);
+        drawable.setCornerRadius(dp(16));
+        view.setBackground(drawable);
+        return view;
+    }
+
+    private String activeLoaderLabel() {
+        String loader = activeLoader();
+        if ("-".equals(loader)) return memoryText();
+        return loader + "  " + memoryText();
+    }
+
+    private LinearLayout progressBar(int color, int percent) {
+        LinearLayout outer = row();
+        outer.setBackground(makeBg(0xff273449, 0xff273449, 99));
+        outer.setPadding(0, 0, 0, 0);
+        LinearLayout fill = new LinearLayout(this);
+        fill.setBackground(makeBg(color, color, 99));
+        outer.addView(fill, new LinearLayout.LayoutParams(0, dp(6), Math.max(1, percent)));
+        TextView rest = new TextView(this);
+        outer.addView(rest, new LinearLayout.LayoutParams(0, dp(6), Math.max(1, 100 - percent)));
+        return outer;
+    }
+
+    private int playerProgressPercent(JSONObject profile) {
+        int max = profile == null ? 0 : profile.optInt("maxPlayers", 0);
+        if (max <= 0) return 0;
+        try {
+            int players = latestStatus.getJSONObject("server").optInt("players", 0);
+            return clamp(players * 100 / max, 0, 100);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private LinearLayout infoCell(String label, String value) {
+        LinearLayout cell = column();
+        cell.setGravity(Gravity.CENTER);
+        cell.setPadding(dp(6), dp(10), dp(6), dp(10));
+        cell.setBackground(makeBg(0xff101a2a, 0xff24334b, 14));
+        TextView labelView = text(label, 12, MUTED, false);
+        labelView.setGravity(Gravity.CENTER);
+        cell.addView(labelView);
+        TextView valueView = text(value, 14, TEXT, true);
+        valueView.setGravity(Gravity.CENTER);
+        cell.addView(valueView);
+        return cell;
+    }
+
+    private LinearLayout sectionCard(String title, String actionLabel, @Nullable Runnable action) {
+        LinearLayout card = column();
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.setBackground(makeBg(0xff111b2b, STROKE, 18));
+        if (title == null || title.isEmpty()) return card;
+        LinearLayout header = row();
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        card.addView(header, matchWrap());
+        header.addView(text(title, 19, TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        if (action != null && actionLabel != null && !actionLabel.isEmpty()) {
+            TextView actionView = text(actionLabel, 14, ACCENT, true);
+            actionView.setOnClickListener(v -> action.run());
+            header.addView(actionView);
+        }
+        return card;
+    }
+
+    private LinearLayout profileStat(String icon, String value, String label, int color) {
+        LinearLayout stat = column();
+        stat.setGravity(Gravity.CENTER);
+        stat.setPadding(dp(4), dp(10), dp(4), dp(10));
+        TextView iconView = text(icon, 22, color, true);
+        iconView.setGravity(Gravity.CENTER);
+        stat.addView(iconView);
+        TextView valueView = text(value, 19, TEXT, true);
+        valueView.setGravity(Gravity.CENTER);
+        stat.addView(valueView);
+        TextView labelView = text(label, 12, MUTED, false);
+        labelView.setGravity(Gravity.CENTER);
+        stat.addView(labelView);
+        return stat;
+    }
+
+    private LinearLayout settingRowIcon(String icon, String title, String subtitle, int color, @Nullable Runnable action) {
+        LinearLayout row = row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), dp(12), dp(14), dp(12));
+        row.setBackground(makeBg(0xff111b2b, STROKE, 16));
+        TextView iconBox = text(icon, 22, color, true);
+        iconBox.setGravity(Gravity.CENTER);
+        iconBox.setBackground(makeBg(tintFor(color), tintFor(color), 12));
+        row.addView(iconBox, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        LinearLayout copy = column();
+        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        copyParams.setMargins(dp(14), 0, dp(8), 0);
+        row.addView(copy, copyParams);
+        copy.addView(text(title, 18, title.equals("Sign Out") ? ERROR : TEXT, true));
+        copy.addView(text(subtitle, 14, MUTED, false));
+        row.addView(text(">", 24, MUTED, true));
+        if (action != null) row.setOnClickListener(v -> action.run());
+        return row;
+    }
+
+    private LinearLayout toggleSettingRow(String icon, String title, String subtitle, int color, boolean checked, @Nullable Consumer<Boolean> action) {
+        LinearLayout row = settingRowIcon(icon, title, subtitle, color, null);
+        row.removeViewAt(row.getChildCount() - 1);
+        CheckBox toggle = new CheckBox(this);
+        toggle.setChecked(checked);
+        toggle.setButtonTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+        toggle.setOnCheckedChangeListener((button, isChecked) -> {
+            if (action != null) action.accept(isChecked);
+        });
+        row.addView(toggle);
+        return row;
+    }
+
+    private int tintFor(int color) {
+        if (color == GREEN) return 0xff113719;
+        if (color == WARNING) return 0xff332914;
+        if (color == PURPLE) return 0xff271d3f;
+        if (color == ERROR) return 0xff351820;
+        return 0xff162a4c;
     }
 
     private GradientDrawable makeBg(int color, int stroke, int radius) {
