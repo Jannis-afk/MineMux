@@ -49,21 +49,21 @@ import java.util.function.Consumer;
 
 public class MineMuxActivity extends Activity {
 
-    private static final int BG = 0xff07111f;
-    private static final int PANEL = 0xff101a2a;
-    private static final int PANEL_ALT = 0xff182437;
-    private static final int PANEL_SOFT = 0xff0d1726;
-    private static final int STROKE = 0xff26364f;
-    private static final int TEXT = 0xfff5f7fb;
-    private static final int MUTED = 0xff9aa8bc;
-    private static final int TERTIARY = 0xff6f7b8f;
-    private static final int ACCENT = 0xff2f86ff;
+    private static final int BG = 0xff050505;
+    private static final int PANEL = 0xff111111;
+    private static final int PANEL_ALT = 0xff1a1a1a;
+    private static final int PANEL_SOFT = 0xff0d0d0d;
+    private static final int STROKE = 0xff303030;
+    private static final int TEXT = 0xfff4f4f4;
+    private static final int MUTED = 0xffa8a8a8;
+    private static final int TERTIARY = 0xff737373;
+    private static final int ACCENT = 0xff0db50d;
     private static final int GREEN = 0xff0db50d;
     private static final int ACCENT_TEXT = 0xffffffff;
-    private static final int WARNING = 0xffffc857;
-    private static final int ERROR = 0xffff4d5a;
-    private static final int RED = 0xffef3f4d;
-    private static final int PURPLE = 0xffa66bff;
+    private static final int WARNING = 0xffd6d6d6;
+    private static final int ERROR = 0xfff4f4f4;
+    private static final int RED = 0xff202020;
+    private static final int PURPLE = 0xff8a8a8a;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Map<Button, Long> buttonCooldowns = new HashMap<>();
@@ -181,7 +181,7 @@ public class MineMuxActivity extends Activity {
         brand.addView(cube);
         cube.setVisibility(View.GONE);
         TextView cubeBlock = new TextView(this);
-        cubeBlock.setBackground(makeBg(GREEN, 0xff86ff95, 7));
+        cubeBlock.setBackground(makeBg(GREEN, GREEN, 7));
         LinearLayout.LayoutParams cubeBlockParams = new LinearLayout.LayoutParams(dp(24), dp(24));
         cubeBlockParams.setMargins(0, 0, dp(10), 0);
         brand.addView(cubeBlock, cubeBlockParams);
@@ -276,12 +276,12 @@ public class MineMuxActivity extends Activity {
 
         TextView avatar = text("MM", 13, TEXT, true);
         avatar.setGravity(Gravity.CENTER);
-        avatar.setBackground(makeBg(0xff1d2d46, controllerOnline ? GREEN : 0xff657187, 24));
+        avatar.setBackground(makeBg(0xff1c1c1c, controllerOnline ? GREEN : 0xff4a4a4a, 24));
         header.addView(avatar, new LinearLayout.LayoutParams(dp(48), dp(48)));
 
         notice = text(controllerOnline ? "" : "Starting local controller...", 13, WARNING, false);
         notice.setPadding(dp(12), dp(8), dp(12), dp(8));
-        notice.setBackground(makeBg(0xff121d2d, STROKE, 14));
+        notice.setBackground(makeBg(0xff151515, STROKE, 14));
         notice.setVisibility(controllerOnline ? View.GONE : View.VISIBLE);
         content.addView(notice);
 
@@ -387,7 +387,7 @@ public class MineMuxActivity extends Activity {
             live.addView(statsA, matchWrapMargin(0, dp(22), 0, dp(10)));
             statsA.addView(statCard("TPS", tpsText() + " / 20", GREEN), weightedButtonParams());
             statsA.addView(statCard("Players", playerCountText() + " / " + maxPlayersText(), ACCENT), weightedButtonParams());
-            statsA.addView(statCard("CPU", cpuText(), 0xff4dbbff), weightedButtonParams());
+            statsA.addView(statCard("CPU", cpuText(), TEXT), weightedButtonParams());
             LinearLayout statsB = row();
             live.addView(statsB, matchWrapMargin(0, 0, 0, dp(10)));
             statsB.addView(statCard("RAM", ramText(), PURPLE), weightedButtonParams());
@@ -422,9 +422,9 @@ public class MineMuxActivity extends Activity {
         activity.addView(activityRow("Controller " + (controllerOnline ? "online" : "starting"), "MineMux local daemon", controllerOnline ? GREEN : WARNING));
         activity.addView(activityRow("Active server", activeServerInstalled() ? activeServerName() : "No server configured", ACCENT));
         activity.addView(activityRow("Backups", "Open restore points and rollback tools", PURPLE));
-        logs = text("No logs yet.", 12, 0xffd9e7ff, false);
+        logs = text("No logs yet.", 12, TEXT, false);
         logs.setTypeface(Typeface.MONOSPACE);
-        logs.setBackground(makeBg(0xff08111f, STROKE, 10));
+        logs.setBackground(makeBg(0xff050505, STROKE, 10));
         logs.setPadding(dp(10), dp(10), dp(10), dp(10));
         activity.addView(logs, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(120)));
         refreshLogs();
@@ -657,7 +657,7 @@ public class MineMuxActivity extends Activity {
         LinearLayout row = row();
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(12), dp(8), dp(12), dp(8));
-        row.setBackground(makeBg(0xff101a2a, selected ? ACCENT : STROKE, 16));
+        row.setBackground(makeBg(PANEL, selected ? GREEN : STROKE, 16));
         row.setLayoutParams(matchWrapMargin(0, 0, 0, dp(10)));
         row.addView(thumbnail(server.optBoolean("running") ? "overworld" : "cave"), new LinearLayout.LayoutParams(dp(76), dp(58)));
 
@@ -878,7 +878,7 @@ public class MineMuxActivity extends Activity {
                     JSONObject mod = installed.getJSONObject(i);
                     TextView item = text(mod.optString("name", mod.optString("fileName", "Installed jar")), 13, TEXT, false);
                     item.setPadding(dp(12), dp(8), dp(12), dp(8));
-                    item.setBackground(makeBg(PANEL, 0xff26342b, 8));
+                    item.setBackground(makeBg(PANEL, STROKE, 8));
                     parent.addView(item, matchWrapMargin(0, 0, 0, dp(6)));
                 }
             } catch (Exception ignored) {}
@@ -918,7 +918,7 @@ public class MineMuxActivity extends Activity {
         profile.addView(profileTop, matchWrap());
         TextView avatar = text("MP", 24, TEXT, true);
         avatar.setGravity(Gravity.CENTER);
-        avatar.setBackground(makeBg(0xff1d2d46, ACCENT, 36));
+        avatar.setBackground(makeBg(0xff1c1c1c, GREEN, 36));
         profileTop.addView(avatar, new LinearLayout.LayoutParams(dp(72), dp(72)));
         LinearLayout identity = column();
         LinearLayout.LayoutParams identityParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
@@ -956,7 +956,7 @@ public class MineMuxActivity extends Activity {
         preferences.addView(toggleSettingRow("↻", "Auto-restart", "Restart server automatically after crash", ACCENT, profileFeatureBool("restartOnCrash", true),
             checked -> postJson("/api/config", "{\"restartOnCrash\":" + checked + "}", "Saving restart setting...", () -> setNotice("Restart setting saved.", false))));
         preferences.addView(settingRowIcon("▰", "Storage", "Manage backups and disk usage", WARNING, () -> setPage("backups")));
-        preferences.addView(settingRowIcon("✚", "Integrations", "Modrinth, GitHub, Discord", 0xff4ddde4, null));
+        preferences.addView(settingRowIcon("✚", "Integrations", "Modrinth, GitHub, Discord", MUTED, null));
 
         TextView serverTitle = text("Server Defaults", 17, MUTED, true);
         serverTitle.setPadding(dp(2), 0, 0, dp(10));
@@ -1034,7 +1034,7 @@ public class MineMuxActivity extends Activity {
         TextView view = text(message, 13, MUTED, false);
         view.setGravity(Gravity.CENTER);
         view.setPadding(dp(14), dp(22), dp(14), dp(22));
-        view.setBackground(makeBg(PANEL, 0xff253026, 8));
+        view.setBackground(makeBg(PANEL, STROKE, 8));
         return view;
     }
 
@@ -1465,7 +1465,7 @@ public class MineMuxActivity extends Activity {
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, values);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinner.setAdapter(adapter);
-        spinner.setBackground(makeBg(PANEL_ALT, 0xff3a493f, 8));
+        spinner.setBackground(makeBg(PANEL_ALT, STROKE, 8));
         return spinner;
     }
 
@@ -1483,7 +1483,7 @@ public class MineMuxActivity extends Activity {
         edit.setHintTextColor(MUTED);
         edit.setTextSize(15);
         edit.setPadding(dp(12), 0, dp(12), 0);
-        edit.setBackground(makeBg(PANEL_ALT, 0xff3a493f, 8));
+        edit.setBackground(makeBg(PANEL_ALT, STROKE, 8));
         return edit;
     }
 
@@ -1503,14 +1503,14 @@ public class MineMuxActivity extends Activity {
     private Button primaryButton(String label) {
         Button button = baseButton(label);
         button.setTextColor(ACCENT_TEXT);
-        button.setBackground(makeBg(ACCENT, 0xff5aa5ff, 12));
+        button.setBackground(makeBg(ACCENT, GREEN, 12));
         return button;
     }
 
     private Button dangerButton(String label) {
         Button button = baseButton(label);
         button.setTextColor(0xffffffff);
-        button.setBackground(makeBg(RED, 0xffff6570, 12));
+        button.setBackground(makeBg(RED, 0xff4a4a4a, 12));
         return button;
     }
 
@@ -1535,7 +1535,7 @@ public class MineMuxActivity extends Activity {
     private void styleTab(Button button, boolean active) {
         if (button == null) return;
         button.setTextColor(active ? 0xffffffff : MUTED);
-        button.setBackground(makeBg(active ? ACCENT : 0x00000000, active ? 0xff5aa5ff : 0x00000000, 16));
+        button.setBackground(makeBg(active ? 0xff102510 : 0x00000000, active ? GREEN : 0x00000000, 16));
     }
 
     private LinearLayout column() {
@@ -1554,7 +1554,7 @@ public class MineMuxActivity extends Activity {
         LinearLayout tabs = row();
         tabs.setGravity(Gravity.CENTER);
         tabs.setPadding(dp(10), dp(10), dp(10), dp(10));
-        tabs.setBackground(makeBg(0xff0f1a2b, STROKE, 24));
+        tabs.setBackground(makeBg(0xff101010, STROKE, 24));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(88));
         params.setMargins(dp(20), dp(8), dp(20), dp(18));
         tabs.setLayoutParams(params);
@@ -1577,8 +1577,8 @@ public class MineMuxActivity extends Activity {
         TextView pill = text(label, 13, color, true);
         pill.setGravity(Gravity.CENTER);
         pill.setPadding(dp(12), dp(6), dp(12), dp(6));
-        int bg = color == GREEN ? 0xff102716 : 0xff182337;
-        int stroke = color == GREEN ? 0xff255d35 : STROKE;
+        int bg = color == GREEN ? 0xff102510 : 0xff191919;
+        int stroke = color == GREEN ? GREEN : STROKE;
         pill.setBackground(makeBg(bg, stroke, 18));
         return pill;
     }
@@ -1609,7 +1609,7 @@ public class MineMuxActivity extends Activity {
         int[] widths = new int[]{34, 54, 45, 68, 58, 74, 64};
         for (int i = 0; i < widths.length; i++) {
             TextView line = new TextView(this);
-            int lineColor = i % 2 == 0 ? color : 0xff31465f;
+            int lineColor = i % 2 == 0 ? color : 0xff3a3a3a;
             line.setBackground(makeBg(lineColor, lineColor, 5));
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(widths[i]), dp(5));
             params.setMargins(0, dp(6), 0, 0);
@@ -1641,16 +1641,16 @@ public class MineMuxActivity extends Activity {
     }
 
     private GradientDrawable voxelBg() {
-        GradientDrawable drawable = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xff49db32, 0xff0db50d, 0xff8b5a2b, 0xff5b321a});
+        GradientDrawable drawable = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xffffffff, 0xffdcdcdc, 0xff0db50d, 0xff070707});
         drawable.setCornerRadius(dp(8));
         return drawable;
     }
 
     private TextView thumbnail(String kind) {
         int[] colors;
-        if ("cave".equals(kind)) colors = new int[]{0xff4b3a2b, 0xff11151c};
-        else if ("nether".equals(kind)) colors = new int[]{0xff572979, 0xff1d0e2e};
-        else colors = new int[]{0xffd1e7ff, 0xff2c7a3d, 0xff225f31};
+        if ("cave".equals(kind)) colors = new int[]{0xff4a4a4a, 0xff0b0b0b};
+        else if ("nether".equals(kind)) colors = new int[]{0xff2a2a2a, 0xff050505};
+        else colors = new int[]{0xfff5f5f5, 0xff8e8e8e, 0xff0db50d};
         TextView view = new TextView(this);
         GradientDrawable drawable = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, colors);
         drawable.setCornerRadius(dp(16));
@@ -1666,7 +1666,7 @@ public class MineMuxActivity extends Activity {
 
     private LinearLayout progressBar(int color, int percent) {
         LinearLayout outer = row();
-        outer.setBackground(makeBg(0xff273449, 0xff273449, 99));
+        outer.setBackground(makeBg(0xff2f2f2f, 0xff2f2f2f, 99));
         outer.setPadding(0, 0, 0, 0);
         LinearLayout fill = new LinearLayout(this);
         fill.setBackground(makeBg(color, color, 99));
@@ -1691,7 +1691,7 @@ public class MineMuxActivity extends Activity {
         LinearLayout cell = column();
         cell.setGravity(Gravity.CENTER);
         cell.setPadding(dp(6), dp(10), dp(6), dp(10));
-        cell.setBackground(makeBg(0xff101a2a, 0xff24334b, 14));
+        cell.setBackground(makeBg(0xff151515, STROKE, 14));
         TextView labelView = text(label, 12, MUTED, false);
         labelView.setGravity(Gravity.CENTER);
         cell.addView(labelView);
@@ -1704,7 +1704,7 @@ public class MineMuxActivity extends Activity {
     private LinearLayout sectionCard(String title, String actionLabel, @Nullable Runnable action) {
         LinearLayout card = column();
         card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        card.setBackground(makeBg(0xff111b2b, STROKE, 18));
+        card.setBackground(makeBg(PANEL, STROKE, 18));
         if (title == null || title.isEmpty()) return card;
         LinearLayout header = row();
         header.setGravity(Gravity.CENTER_VERTICAL);
@@ -1738,7 +1738,7 @@ public class MineMuxActivity extends Activity {
         LinearLayout row = row();
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(14), dp(12), dp(14), dp(12));
-        row.setBackground(makeBg(0xff111b2b, STROKE, 16));
+        row.setBackground(makeBg(PANEL, STROKE, 16));
         TextView iconBox = text(icon, 22, color, true);
         iconBox.setGravity(Gravity.CENTER);
         iconBox.setBackground(makeBg(tintFor(color), tintFor(color), 12));
@@ -1768,11 +1768,8 @@ public class MineMuxActivity extends Activity {
     }
 
     private int tintFor(int color) {
-        if (color == GREEN) return 0xff113719;
-        if (color == WARNING) return 0xff332914;
-        if (color == PURPLE) return 0xff271d3f;
-        if (color == ERROR) return 0xff351820;
-        return 0xff162a4c;
+        if (color == GREEN) return 0xff102510;
+        return 0xff202020;
     }
 
     private GradientDrawable makeBg(int color, int stroke, int radius) {
