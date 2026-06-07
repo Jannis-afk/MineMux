@@ -61,6 +61,8 @@ type app struct {
 	server         *serverProcess
 	activeMu       sync.RWMutex
 	activeServerID string
+	statsMu        sync.Mutex
+	lastCPU        cpuSample
 }
 
 type appPaths struct {
@@ -161,6 +163,7 @@ type statusResponse struct {
 	Paths     appPaths     `json:"paths"`
 	Profile   *profile     `json:"profile,omitempty"`
 	Server    serverStatus `json:"server"`
+	System    systemStatus `json:"system"`
 }
 
 type serverStatus struct {
@@ -174,6 +177,37 @@ type serverStatus struct {
 	UptimeSec   int64      `json:"uptimeSec,omitempty"`
 	TPS         float64    `json:"tps,omitempty"`
 	Players     int        `json:"players"`
+}
+
+type systemStatus struct {
+	CPU    cpuStatus    `json:"cpu"`
+	Memory memoryStatus `json:"memory"`
+	Disk   diskStatus   `json:"disk"`
+}
+
+type cpuStatus struct {
+	Percent float64 `json:"percent"`
+	Cores   int     `json:"cores"`
+}
+
+type memoryStatus struct {
+	TotalBytes     uint64  `json:"totalBytes"`
+	AvailableBytes uint64  `json:"availableBytes"`
+	UsedBytes      uint64  `json:"usedBytes"`
+	Percent        float64 `json:"percent"`
+}
+
+type diskStatus struct {
+	Path           string  `json:"path"`
+	TotalBytes     uint64  `json:"totalBytes"`
+	AvailableBytes uint64  `json:"availableBytes"`
+	UsedBytes      uint64  `json:"usedBytes"`
+	Percent        float64 `json:"percent"`
+}
+
+type cpuSample struct {
+	total uint64
+	idle  uint64
 }
 
 type commandRequest struct {
@@ -335,6 +369,7 @@ func main() {
 	if err := a.ensureDirs(); err != nil {
 		log.Fatal(err)
 	}
+	a.startConfiguredServerIfNeeded()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleIndex)
@@ -535,7 +570,153 @@ func (a *app) status() statusResponse {
 		Paths:     a.paths(),
 		Profile:   p,
 		Server:    a.server.status(a),
+		System:    a.systemStatus(),
 	}
+}
+
+func (a *app) startConfiguredServerIfNeeded() {
+	p, err := a.loadProfile()
+	if err != nil || p == nil || !p.Features.AutoStart {
+		return
+	}
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		if err := a.server.start(context.Background(), a, p); err != nil {
+			a.server.mu.Lock()
+			a.server.lastError = "auto-start failed: " + err.Error()
+			a.server.mu.Unlock()
+		}
+	}()
+}
+
+func (a *app) systemStatus() systemStatus {
+	return systemStatus{
+		CPU:    a.cpuStatus(),
+		Memory: memoryStatusFromProc(),
+		Disk:   diskStatusForPath(a.home),
+	}
+}
+
+func (a *app) cpuStatus() cpuStatus {
+	status := cpuStatus{Cores: runtime.NumCPU()}
+	sample, err := readCPUSample()
+	if err != nil || sample.total == 0 {
+		return status
+	}
+	a.statsMu.Lock()
+	defer a.statsMu.Unlock()
+	if a.lastCPU.total > 0 && sample.total > a.lastCPU.total {
+		totalDelta := sample.total - a.lastCPU.total
+		idleDelta := sample.idle - a.lastCPU.idle
+		if totalDelta > 0 && totalDelta >= idleDelta {
+			status.Percent = clampFloat(float64(totalDelta-idleDelta)*100/float64(totalDelta), 0, 100)
+		}
+	}
+	a.lastCPU = sample
+	return status
+}
+
+func readCPUSample() (cpuSample, error) {
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return cpuSample{}, err
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	if !scanner.Scan() {
+		return cpuSample{}, errors.New("empty /proc/stat")
+	}
+	fields := strings.Fields(scanner.Text())
+	if len(fields) < 5 || fields[0] != "cpu" {
+		return cpuSample{}, errors.New("unexpected /proc/stat format")
+	}
+	var values []uint64
+	for _, raw := range fields[1:] {
+		value, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return cpuSample{}, err
+		}
+		values = append(values, value)
+	}
+	var total uint64
+	for _, value := range values {
+		total += value
+	}
+	idle := values[3]
+	if len(values) > 4 {
+		idle += values[4]
+	}
+	return cpuSample{total: total, idle: idle}, nil
+}
+
+func memoryStatusFromProc() memoryStatus {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return memoryStatus{}
+	}
+	values := map[string]uint64{}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		key := strings.TrimSuffix(fields[0], ":")
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		values[key] = value * 1024
+	}
+	total := values["MemTotal"]
+	available := values["MemAvailable"]
+	if available == 0 {
+		available = values["MemFree"] + values["Buffers"] + values["Cached"]
+	}
+	used := uint64(0)
+	percent := float64(0)
+	if total > available {
+		used = total - available
+	}
+	if total > 0 {
+		percent = clampFloat(float64(used)*100/float64(total), 0, 100)
+	}
+	return memoryStatus{TotalBytes: total, AvailableBytes: available, UsedBytes: used, Percent: percent}
+}
+
+func diskStatusForPath(path string) diskStatus {
+	out, err := exec.Command("df", "-k", path).Output()
+	if err != nil {
+		return diskStatus{Path: path}
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 {
+		return diskStatus{Path: path}
+	}
+	fields := strings.Fields(lines[len(lines)-1])
+	if len(fields) < 4 {
+		return diskStatus{Path: path}
+	}
+	totalKB, _ := strconv.ParseUint(fields[1], 10, 64)
+	usedKB, _ := strconv.ParseUint(fields[2], 10, 64)
+	availableKB, _ := strconv.ParseUint(fields[3], 10, 64)
+	total := totalKB * 1024
+	used := usedKB * 1024
+	available := availableKB * 1024
+	percent := float64(0)
+	if total > 0 {
+		percent = clampFloat(float64(used)*100/float64(total), 0, 100)
+	}
+	return diskStatus{Path: path, TotalBytes: total, AvailableBytes: available, UsedBytes: used, Percent: percent}
+}
+
+func clampFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func (s *serverProcess) start(ctx context.Context, a *app, p *profile) error {

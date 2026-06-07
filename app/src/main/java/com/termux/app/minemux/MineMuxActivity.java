@@ -66,6 +66,7 @@ public class MineMuxActivity extends Activity {
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Map<Button, Long> buttonCooldowns = new HashMap<>();
+    private final ArrayList<String> pageHistory = new ArrayList<>();
     private final Runnable pollStatus = new Runnable() {
         @Override
         public void run() {
@@ -92,6 +93,8 @@ public class MineMuxActivity extends Activity {
     private Button settingsTab;
     private Button webButton;
     private String currentPage = "dashboard";
+    private boolean navigatingBack;
+    private long lastBackPressMs;
     private boolean controllerOnline;
     private boolean operationRunning;
     private Boolean lastDashboardInstalled;
@@ -125,6 +128,29 @@ public class MineMuxActivity extends Activity {
     protected void onPause() {
         super.onPause();
         mainHandler.removeCallbacks(pollStatus);
+    }
+
+    @Override
+    public void onBackPressed() {
+        if ("setup".equals(currentPage) && setupStep > 0) {
+            setupStep--;
+            setPage("setup");
+            return;
+        }
+        if (!"dashboard".equals(currentPage)) {
+            String previous = pageHistory.isEmpty() ? "dashboard" : pageHistory.remove(pageHistory.size() - 1);
+            navigatingBack = true;
+            setPage(previous);
+            navigatingBack = false;
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastBackPressMs < 2000) {
+            super.onBackPressed();
+            return;
+        }
+        lastBackPressMs = now;
+        Toast.makeText(this, "Press back again to exit MineMux", Toast.LENGTH_SHORT).show();
     }
 
     private View buildContent() {
@@ -161,7 +187,7 @@ public class MineMuxActivity extends Activity {
         brand.addView(text("MineMux", 30, TEXT, true));
         titleBlock.addView(text("Phone Minecraft server", 13, MUTED, false));
 
-        notice = text("Starting local controller...", 14, WARNING, false);
+        notice = text(controllerOnline ? "Ready" : "Starting local controller...", 14, WARNING, false);
         notice.setPadding(0, dp(14), 0, dp(10));
         root.addView(notice);
 
@@ -193,13 +219,12 @@ public class MineMuxActivity extends Activity {
         pageTitle = text("", 20, TEXT, true);
         root.addView(pageTitle);
 
-        content = column();
-        root.addView(content, matchWrap());
+        content = root;
 
         LinearLayout tabs = bottomNav();
-        dashboardTab = tabButton("Dashboard", "dashboard");
-        serversTab = tabButton("Servers", "servers");
-        settingsTab = tabButton("Settings", "settings");
+        dashboardTab = tabButton("⌂", "dashboard");
+        serversTab = tabButton("▤", "servers");
+        settingsTab = tabButton("⚙", "settings");
         tabs.addView(dashboardTab, weightedTabParams());
         tabs.addView(serversTab, weightedTabParams());
         tabs.addView(settingsTab, weightedTabParams());
@@ -210,9 +235,13 @@ public class MineMuxActivity extends Activity {
     }
 
     private void setPage(String page) {
+        if (!navigatingBack && content != null && currentPage != null && !currentPage.equals(page)) {
+            pageHistory.add(currentPage);
+        }
         currentPage = page;
         if (content == null) return;
         content.removeAllViews();
+        buildScreenChrome(page);
         updateTabs();
         if ("setup".equals(page)) buildSetupPage();
         else if ("servers".equals(page)) buildServersPage();
@@ -220,6 +249,75 @@ public class MineMuxActivity extends Activity {
         else if ("backups".equals(page)) buildBackupsPage();
         else buildDashboardPage();
         setControllerActionsEnabled(controllerOnline);
+    }
+
+    private void buildScreenChrome(String page) {
+        LinearLayout header = row();
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        content.addView(header, matchWrap());
+
+        LinearLayout titleBlock = column();
+        header.addView(titleBlock, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout brand = row();
+        brand.setGravity(Gravity.CENTER_VERTICAL);
+        titleBlock.addView(brand);
+        TextView cubeBlock = new TextView(this);
+        cubeBlock.setBackground(makeBg(GREEN, 0xff86ff95, 7));
+        LinearLayout.LayoutParams cubeBlockParams = new LinearLayout.LayoutParams(dp(24), dp(24));
+        cubeBlockParams.setMargins(0, 0, dp(10), 0);
+        brand.addView(cubeBlock, cubeBlockParams);
+        brand.addView(text(screenBrand(page), 30, TEXT, true));
+        titleBlock.addView(text(screenSubtitle(page), 13, MUTED, false));
+
+        TextView avatar = text("MM", 13, TEXT, true);
+        avatar.setGravity(Gravity.CENTER);
+        avatar.setBackground(makeBg(0xff1d2d46, controllerOnline ? GREEN : STROKE, 24));
+        header.addView(avatar, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+        notice = text("Starting local controller...", 14, WARNING, false);
+        notice.setPadding(0, dp(14), 0, dp(10));
+        content.addView(notice);
+
+        globalProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        globalProgress.setIndeterminate(true);
+        globalProgress.setVisibility(operationRunning ? View.VISIBLE : View.GONE);
+        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4));
+        progressParams.setMargins(0, 0, 0, dp(8));
+        content.addView(globalProgress, progressParams);
+
+        operationPanel = card();
+        operationPanel.setPadding(dp(14), dp(12), dp(14), dp(12));
+        operationPanel.setVisibility(operationRunning ? View.VISIBLE : View.GONE);
+        content.addView(operationPanel, matchWrapMargin(0, dp(10), 0, dp(8)));
+        operationTitle = text(operationRunning ? "Working" : "Ready", 15, TEXT, true);
+        operationDetail = text(operationMessage, 12, MUTED, false);
+        operationPanel.addView(operationTitle);
+        operationPanel.addView(operationDetail);
+
+        pageTitle = text(screenTitle(page), 28, TEXT, true);
+        pageTitle.setPadding(0, dp(6), 0, dp(8));
+        content.addView(pageTitle);
+    }
+
+    private String screenBrand(String page) {
+        if ("settings".equals(page)) return "Settings";
+        return "MineMux";
+    }
+
+    private String screenTitle(String page) {
+        if ("servers".equals(page)) return "Servers";
+        if ("settings".equals(page)) return "Settings";
+        if ("setup".equals(page)) return "Setup Server";
+        if ("backups".equals(page)) return "Backups";
+        return "Dashboard";
+    }
+
+    private String screenSubtitle(String page) {
+        if ("servers".equals(page)) return "Manage configured worlds";
+        if ("settings".equals(page)) return "Profile, preferences, and advanced tools";
+        if ("setup".equals(page)) return "Guided Android-first server setup";
+        if ("backups".equals(page)) return "Restore points and rollback";
+        return "Phone Minecraft server";
     }
 
     private void buildDashboardPage() {
@@ -246,9 +344,9 @@ public class MineMuxActivity extends Activity {
             LinearLayout titleTexts = column();
             titleRow.addView(titleTexts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             titleTexts.addView(text(activeServerName(), 25, TEXT, true));
-            titleTexts.addView(text(joinAddress.getText().toString(), 15, MUTED, false));
+            titleTexts.addView(text(joinAddressText(), 15, MUTED, false));
             titleRow.addView(statusPill(activeServerRunning() ? "Running" : "Ready", activeServerRunning() ? GREEN : MUTED));
-            live.addView(text("Minecraft " + version.getText() + "  /  " + activeLoader() + "  /  " + memory.getText(), 14, MUTED, false));
+            live.addView(text("Minecraft " + versionText() + "  /  " + activeLoader() + "  /  " + memoryText(), 14, MUTED, false));
 
             LinearLayout controls = row();
             live.addView(controls, matchWrapMargin(0, dp(14), 0, 0));
@@ -269,11 +367,11 @@ public class MineMuxActivity extends Activity {
             statsA.addView(statCard("Players", playerCountText() + " / " + maxPlayersText(), ACCENT), weightedButtonParams());
             LinearLayout statsB = row();
             content.addView(statsB, matchWrapMargin(0, 0, 0, dp(8)));
-            statsB.addView(statCard("CPU", "Live soon", ACCENT), weightedButtonParams());
-            statsB.addView(statCard("RAM", memory.getText().toString(), PURPLE), weightedButtonParams());
+            statsB.addView(statCard("CPU", cpuText(), ACCENT), weightedButtonParams());
+            statsB.addView(statCard("RAM", ramText(), PURPLE), weightedButtonParams());
             LinearLayout statsC = row();
             content.addView(statsC, matchWrapMargin(0, 0, 0, dp(8)));
-            statsC.addView(statCard("Disk", "Live soon", WARNING), weightedButtonParams());
+            statsC.addView(statCard("Disk", diskText(), WARNING), weightedButtonParams());
             statsC.addView(statCard("Uptime", uptimeText(), GREEN), weightedButtonParams());
 
             LinearLayout graphs = row();
@@ -689,7 +787,7 @@ public class MineMuxActivity extends Activity {
         profile.addView(identity, identityParams);
         identity.addView(text("MineMux Runtime", 22, TEXT, true));
         identity.addView(text(controllerOnline ? "Controller online" : "Controller starting", 13, controllerOnline ? GREEN : WARNING, false));
-        info.addView(summaryLine("Join address", joinAddress.getText().toString()));
+        info.addView(summaryLine("Join address", joinAddressText()));
         info.addView(summaryLine("Active server", activeServerInstalled() ? activeServerName() : "None configured"));
         info.addView(summaryLine("Package", "com.termux MVP runtime"));
 
@@ -699,9 +797,32 @@ public class MineMuxActivity extends Activity {
         LinearLayout preferences = glassCard();
         preferences.setPadding(dp(12), dp(8), dp(12), dp(8));
         content.addView(preferences, matchWrapMargin(0, 0, 0, dp(10)));
-        preferences.addView(settingsRow("General Settings", "Runtime defaults and server behavior", ACCENT, null));
+        CheckBox autoStart = settingCheckBox("Start on boot", "Start the active server when MineMux daemon starts.", profileFeatureBool("autoStart", false));
+        preferences.addView(autoStart, matchWrapMargin(0, dp(4), 0, dp(4)));
+        autoStart.setOnCheckedChangeListener((button, checked) -> postJson("/api/config", "{\"autoStart\":" + checked + "}", "Saving start setting...", () -> setNotice("Start setting saved.", false)));
+        CheckBox restartCrash = settingCheckBox("Auto-restart on crash", "Restart the server automatically after a crash.", profileFeatureBool("restartOnCrash", true));
+        preferences.addView(restartCrash, matchWrapMargin(0, dp(4), 0, dp(4)));
+        restartCrash.setOnCheckedChangeListener((button, checked) -> postJson("/api/config", "{\"restartOnCrash\":" + checked + "}", "Saving restart setting...", () -> setNotice("Restart setting saved.", false)));
         preferences.addView(settingsRow("Storage", "Backups and disk usage", WARNING, () -> setPage("backups")));
         preferences.addView(settingsRow("Notifications", "Server status alerts are not enabled yet", PURPLE, null));
+
+        TextView serverTitle = text("Server Defaults", 13, MUTED, true);
+        serverTitle.setPadding(0, dp(4), 0, dp(6));
+        content.addView(serverTitle);
+        LinearLayout defaults = glassCard();
+        defaults.setPadding(dp(12), dp(12), dp(12), dp(12));
+        content.addView(defaults, matchWrapMargin(0, 0, 0, dp(10)));
+        EditText memoryInput = input(String.valueOf(profileInt("memoryMb", wizardMemory)));
+        addField(defaults, "Memory MB", memoryInput);
+        EditText playersInput = input(String.valueOf(profileInt("maxPlayers", wizardPlayers)));
+        addField(defaults, "Max players", playersInput);
+        Button saveDefaults = primaryButton("Save Defaults");
+        saveDefaults.setOnClickListener(v -> {
+            int memoryValue = clamp(numberOr(memoryInput, wizardMemory), 512, 8192);
+            int playersValue = clamp(numberOr(playersInput, wizardPlayers), 1, 50);
+            actionButton(saveDefaults, "/api/config", "{\"memoryMb\":" + memoryValue + ",\"maxPlayers\":" + playersValue + "}", "Saving server defaults...");
+        });
+        defaults.addView(saveDefaults, fullWidthButtonParams());
 
         TextView advancedTitle = text("Advanced", 13, MUTED, true);
         advancedTitle.setPadding(0, dp(4), 0, dp(6));
@@ -782,11 +903,11 @@ public class MineMuxActivity extends Activity {
                 JSONObject profile = latestStatus.optJSONObject("profile");
                 failedPolls = 0;
                 controllerOnline = true;
-                daemonState.setText("Online");
-                serverState.setText(server.optBoolean("running") ? "Running" : server.optBoolean("installed") ? "Ready" : "Needs Setup");
-                joinAddress.setText(server.optString("joinAddress", defaultJoinAddress()));
-                version.setText(profile != null ? profile.optString("minecraftVersion", "-") : "-");
-                memory.setText(profile != null ? profile.optInt("memoryMb", 0) + " MB" : "-");
+                if (daemonState != null) daemonState.setText("Online");
+                if (serverState != null) serverState.setText(server.optBoolean("running") ? "Running" : server.optBoolean("installed") ? "Ready" : "Needs Setup");
+                if (joinAddress != null) joinAddress.setText(server.optString("joinAddress", defaultJoinAddress()));
+                if (version != null) version.setText(profile != null ? profile.optString("minecraftVersion", "-") : "-");
+                if (memory != null) memory.setText(profile != null ? profile.optInt("memoryMb", 0) + " MB" : "-");
                 setControllerActionsEnabled(true);
                 setNotice(server.optString("lastError", ""), server.has("lastError") && !server.optString("lastError").isEmpty());
                 if ("dashboard".equals(currentPage) || operationRunning) refreshLogs();
@@ -805,7 +926,7 @@ public class MineMuxActivity extends Activity {
             failedPolls++;
             controllerOnline = false;
             setControllerActionsEnabled(false);
-            daemonState.setText("Starting");
+            if (daemonState != null) daemonState.setText("Starting");
             if (failedPolls < 3) setNotice("Starting local controller...", false);
             else setNotice("Controller not reachable: " + error, true);
         });
@@ -1048,6 +1169,32 @@ public class MineMuxActivity extends Activity {
         }
     }
 
+    private String joinAddressText() {
+        try {
+            return latestStatus.getJSONObject("server").optString("joinAddress", defaultJoinAddress());
+        } catch (Exception e) {
+            return defaultJoinAddress();
+        }
+    }
+
+    private String versionText() {
+        try {
+            JSONObject profile = latestStatus.optJSONObject("profile");
+            return profile == null ? "-" : profile.optString("minecraftVersion", "-");
+        } catch (Exception e) {
+            return "-";
+        }
+    }
+
+    private String memoryText() {
+        try {
+            JSONObject profile = latestStatus.optJSONObject("profile");
+            return profile == null ? "-" : profile.optInt("memoryMb", 0) + " MB";
+        } catch (Exception e) {
+            return "-";
+        }
+    }
+
     private String activeLoader() {
         try {
             JSONObject profile = latestStatus.optJSONObject("profile");
@@ -1066,12 +1213,75 @@ public class MineMuxActivity extends Activity {
         }
     }
 
+    private boolean profileFeatureBool(String key, boolean fallback) {
+        try {
+            JSONObject profile = latestStatus == null ? null : latestStatus.optJSONObject("profile");
+            if (profile == null) return fallback;
+            JSONObject features = profile.optJSONObject("features");
+            return features == null ? fallback : features.optBoolean(key, fallback);
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private int profileInt(String key, int fallback) {
+        try {
+            JSONObject profile = latestStatus == null ? null : latestStatus.optJSONObject("profile");
+            return profile == null ? fallback : profile.optInt(key, fallback);
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private String cpuText() {
+        try {
+            JSONObject cpu = latestStatus.getJSONObject("system").getJSONObject("cpu");
+            double percent = cpu.optDouble("percent", 0);
+            if (percent <= 0) return "Sampling";
+            return new DecimalFormat("#.#").format(percent) + "%";
+        } catch (Exception e) {
+            return "-";
+        }
+    }
+
+    private String ramText() {
+        return systemStorageText("memory");
+    }
+
+    private String diskText() {
+        return systemStorageText("disk");
+    }
+
+    private String systemStorageText(String key) {
+        try {
+            JSONObject stats = latestStatus.getJSONObject("system").getJSONObject(key);
+            double percent = stats.optDouble("percent", 0);
+            long used = stats.optLong("usedBytes", 0);
+            long total = stats.optLong("totalBytes", 0);
+            if (total <= 0) return "-";
+            return new DecimalFormat("#").format(percent) + "%  " + bytes(used) + " / " + bytes(total);
+        } catch (Exception e) {
+            return "-";
+        }
+    }
+
     private String appVersionText() {
         try {
             return latestStatus == null ? "MVP" : latestStatus.optString("version", "MVP");
         } catch (Exception e) {
             return "MVP";
         }
+    }
+
+    private CheckBox settingCheckBox(String title, String subtitle, boolean checked) {
+        CheckBox box = new CheckBox(this);
+        box.setText(title + "\n" + subtitle);
+        box.setTextColor(TEXT);
+        box.setTextSize(14);
+        box.setChecked(checked);
+        box.setButtonTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+        box.setPadding(dp(4), dp(8), dp(4), dp(8));
+        return box;
     }
 
     private void updateTabs() {
@@ -1127,8 +1337,9 @@ public class MineMuxActivity extends Activity {
     private Button tabButton(String label, String page) {
         Button button = new Button(this);
         button.setText(label);
+        button.setContentDescription(screenTitle(page));
         button.setAllCaps(false);
-        button.setTextSize(14);
+        button.setTextSize(24);
         button.setMinHeight(0);
         button.setMinimumHeight(0);
         button.setOnClickListener(v -> setPage(page));
