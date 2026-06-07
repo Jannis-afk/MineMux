@@ -47,6 +47,8 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="false"
         android:theme="@style/Theme.TermuxApp.DayNight.DarkActionBar"
+        android:networkSecurityConfig="@xml/minemux_network_security_config"
+        android:usesCleartextTraffic="true"
         tools:targetApi="m">
 
         <activity
@@ -83,6 +85,12 @@
             android:resizeableActivity="true"
             android:theme="@style/Theme.TermuxActivity.DayNight.NoActionBar"
             tools:targetApi="n" />
+
+        <activity
+            android:name=".app.minemux.MineMuxWebActivity"
+            android:exported="false"
+            android:label="MineMux Power UI"
+            android:theme="@style/Theme.TermuxActivity.DayNight.NoActionBar" />
 
         <activity-alias
             android:name=".HomeActivity"

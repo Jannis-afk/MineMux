@@ -16,6 +16,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 public final class MineMuxRuntime {
 
@@ -51,10 +52,15 @@ public final class MineMuxRuntime {
             "export CRAFTNODE_WEBUI_INDEX=\"$MINEMUX_WEBUI_INDEX\"\n" +
             "mkdir -p \"$MINEMUX_HOME/logs\"\n" +
             "cd \"$HOME/minemux/daemon\"\n" +
-            "if command -v curl >/dev/null 2>&1 && curl -fsS http://127.0.0.1:8787/api/health >/dev/null 2>&1; then\n" +
-            "  echo \"[$(date -Is)] MineMux daemon is already running.\"\n" +
+            "PIDFILE=\"$MINEMUX_HOME/daemon/minemux-daemon.pid\"\n" +
+            "echo \"[$(date -Is)] MineMux start script invoked\" >> \"$MINEMUX_HOME/logs/daemon.log\"\n" +
+            "echo \"[$(date -Is)] cwd=$(pwd) user=$(id)\" >> \"$MINEMUX_HOME/logs/daemon.log\"\n" +
+            "ls -l ./minemux-daemon >> \"$MINEMUX_HOME/logs/daemon.log\" 2>&1 || true\n" +
+            "if [ -f \"$PIDFILE\" ] && kill -0 \"$(cat \"$PIDFILE\")\" >/dev/null 2>&1; then\n" +
+            "  echo \"[$(date -Is)] MineMux daemon is already running as pid $(cat \"$PIDFILE\").\" >> \"$MINEMUX_HOME/logs/daemon.log\"\n" +
             "  exit 0\n" +
             "fi\n" +
+            "echo $$ > \"$PIDFILE\"\n" +
             "exec ./minemux-daemon >> \"$MINEMUX_HOME/logs/daemon.log\" 2>&1\n");
         writeExecutable(bootScript,
             "#!/data/data/" + TermuxConstants.TERMUX_PACKAGE_NAME + "/files/usr/bin/sh\n" +
@@ -96,16 +102,16 @@ public final class MineMuxRuntime {
     private static void copyAssetIfChanged(Context context, String asset, File target, boolean executable) {
         try (InputStream in = context.getAssets().open(asset)) {
             byte[] data = readAll(in);
-            if (target.exists() && target.length() == data.length) {
+            if (target.exists() && target.length() == data.length && Arrays.equals(readExisting(target), data)) {
                 if (executable) //noinspection ResultOfMethodCallIgnored
-                    target.setExecutable(true);
+                target.setExecutable(true, true);
                 return;
             }
             try (FileOutputStream out = new FileOutputStream(target)) {
                 out.write(data);
             }
             if (executable) //noinspection ResultOfMethodCallIgnored
-                target.setExecutable(true);
+                target.setExecutable(true, true);
         } catch (IOException e) {
             Log.e(TAG, "Failed to copy asset " + asset + " to " + target, e);
         }
@@ -121,13 +127,19 @@ public final class MineMuxRuntime {
         return out.toByteArray();
     }
 
+    private static byte[] readExisting(File file) throws IOException {
+        try (InputStream in = new java.io.FileInputStream(file)) {
+            return readAll(in);
+        }
+    }
+
     private static void writeExecutable(File file, String content) {
         try (FileOutputStream out = new FileOutputStream(file)) {
             out.write(content.getBytes(StandardCharsets.UTF_8));
             //noinspection ResultOfMethodCallIgnored
             file.setReadable(true);
             //noinspection ResultOfMethodCallIgnored
-            file.setExecutable(true);
+            file.setExecutable(true, true);
         } catch (IOException e) {
             Log.e(TAG, "Failed to write " + file, e);
         }

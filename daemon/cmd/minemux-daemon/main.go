@@ -541,9 +541,11 @@ func (s *serverProcess) status(a *app) serverStatus {
 	if status.Running {
 		status.PID = s.cmd.Process.Pid
 	}
-	if p != nil {
-		status.JoinAddress = localJoinAddress(p.Ports.JavaTCP)
+	port := 25565
+	if p != nil && p.Ports.JavaTCP > 0 {
+		port = p.Ports.JavaTCP
 	}
+	status.JoinAddress = localJoinAddress(port)
 	return status
 }
 
@@ -693,6 +695,20 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	javaMajor := detectJavaMajor()
+	if javaMajor <= 0 {
+		a.server.mu.Lock()
+		a.server.appendLogLocked("Java not found; installing OpenJDK package")
+		a.server.mu.Unlock()
+		if err := ensureJavaInstalled(); err != nil {
+			writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+			return
+		}
+		javaMajor = detectJavaMajor()
+		if javaMajor <= 0 {
+			writeJSON(w, http.StatusBadGateway, apiError{Error: "OpenJDK install finished but java is still unavailable"})
+			return
+		}
+	}
 	p := a.defaultProfile(req.MinecraftVersion, javaMajor)
 	if req.MemoryMB > 0 {
 		p.MemoryMB = clampInt(req.MemoryMB, 512, 8192)
@@ -1481,6 +1497,25 @@ func detectJavaMajor() int {
 	}
 	major, _ := strconv.Atoi(match[1])
 	return major
+}
+
+func ensureJavaInstalled() error {
+	if detectJavaMajor() > 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("pkg"); err != nil {
+		return errors.New("Java is not installed and Termux pkg is unavailable; open Terminal and run: pkg install openjdk-25")
+	}
+	for _, packageName := range []string{"openjdk-25", "openjdk-21"} {
+		cmd := exec.Command("pkg", "install", "-y", packageName)
+		cmd.Env = cleanJavaEnv(os.Environ())
+		out, err := cmd.CombinedOutput()
+		if err == nil && detectJavaMajor() > 0 {
+			return nil
+		}
+		log.Printf("install %s failed: %v %s", packageName, err, strings.TrimSpace(string(out)))
+	}
+	return errors.New("could not install OpenJDK; check network access or run in Terminal: pkg install openjdk-25")
 }
 
 func cleanJavaEnv(env []string) []string {

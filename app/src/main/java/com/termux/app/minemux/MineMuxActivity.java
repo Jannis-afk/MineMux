@@ -2,7 +2,6 @@ package com.termux.app.minemux;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -27,8 +26,12 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Enumeration;
 
 public class MineMuxActivity extends Activity {
 
@@ -49,6 +52,13 @@ public class MineMuxActivity extends Activity {
     private TextView notice;
     private TextView logs;
     private CheckBox eula;
+    private Button setupButton;
+    private Button startButton;
+    private Button stopButton;
+    private Button restartButton;
+    private Button webButton;
+    private int failedPolls;
+    private boolean controllerOnline;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -72,11 +82,11 @@ public class MineMuxActivity extends Activity {
     private View buildContent() {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(0xff101412);
+        scroll.setBackgroundColor(0xff0e1110);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(14), dp(16), dp(24));
+        root.setPadding(dp(18), dp(16), dp(18), dp(26));
         scroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout header = new LinearLayout(this);
@@ -84,15 +94,22 @@ public class MineMuxActivity extends Activity {
         header.setOrientation(LinearLayout.HORIZONTAL);
         root.addView(header, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        TextView title = text("MineMux", 26, 0xffedf5ef, true);
-        header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout titleBlock = new LinearLayout(this);
+        titleBlock.setOrientation(LinearLayout.VERTICAL);
+        header.addView(titleBlock, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView title = text("MineMux", 28, 0xfff4f7f4, true);
+        titleBlock.addView(title);
+
+        TextView subtitle = text("Phone Minecraft server", 13, 0xff9aa69d, false);
+        titleBlock.addView(subtitle);
 
         Button terminal = button("Terminal");
         terminal.setOnClickListener(v -> startActivity(new Intent(this, TermuxActivity.class)));
         header.addView(terminal);
 
         notice = text("Starting local controller...", 14, 0xffffdca3, false);
-        notice.setPadding(0, dp(10), 0, dp(12));
+        notice.setPadding(0, dp(14), 0, dp(12));
         root.addView(notice);
 
         LinearLayout statusGrid = new LinearLayout(this);
@@ -101,7 +118,7 @@ public class MineMuxActivity extends Activity {
 
         daemonState = addMetric(statusGrid, "Controller", "Starting");
         serverState = addMetric(statusGrid, "Server", "Unknown");
-        joinAddress = addMetric(statusGrid, "Join Address", "-");
+        joinAddress = addMetric(statusGrid, "Join From Minecraft", defaultJoinAddress());
         version = addMetric(statusGrid, "Minecraft", "-");
         memory = addMetric(statusGrid, "Memory", "-");
 
@@ -114,15 +131,15 @@ public class MineMuxActivity extends Activity {
         eula.setTextSize(15);
         root.addView(eula);
 
-        Button setup = primaryButton("Setup Paper Server");
-        setup.setOnClickListener(v -> {
+        setupButton = primaryButton("Setup Paper Server");
+        setupButton.setOnClickListener(v -> {
             if (!eula.isChecked()) {
                 setNotice("Accept the Minecraft EULA first.", true);
                 return;
             }
             postJson("/api/server/setup", "{\"minecraftVersion\":\"latest-compatible\",\"memoryMb\":2048,\"maxPlayers\":8,\"viewDistance\":6,\"simulationDistance\":4,\"acceptEula\":true}", "Setting up Paper. This can take a while...");
         });
-        root.addView(setup, fullWidthButtonParams());
+        root.addView(setupButton, fullWidthButtonParams());
 
         TextView controlsTitle = sectionTitle("Server Controls");
         root.addView(controlsTitle);
@@ -132,21 +149,21 @@ public class MineMuxActivity extends Activity {
         controls.setGravity(Gravity.CENTER);
         root.addView(controls);
 
-        Button start = primaryButton("Start");
-        start.setOnClickListener(v -> postJson("/api/server/start", "{}", "Starting server..."));
-        controls.addView(start, weightedButtonParams());
+        startButton = primaryButton("Start");
+        startButton.setOnClickListener(v -> postJson("/api/server/start", "{}", "Starting server..."));
+        controls.addView(startButton, weightedButtonParams());
 
-        Button stop = button("Stop");
-        stop.setOnClickListener(v -> postJson("/api/server/stop", "{}", "Stopping server..."));
-        controls.addView(stop, weightedButtonParams());
+        stopButton = button("Stop");
+        stopButton.setOnClickListener(v -> postJson("/api/server/stop", "{}", "Stopping server..."));
+        controls.addView(stopButton, weightedButtonParams());
 
-        Button restart = button("Restart");
-        restart.setOnClickListener(v -> postJson("/api/server/restart", "{}", "Restarting server..."));
-        controls.addView(restart, weightedButtonParams());
+        restartButton = button("Restart");
+        restartButton.setOnClickListener(v -> postJson("/api/server/restart", "{}", "Restarting server..."));
+        controls.addView(restartButton, weightedButtonParams());
 
-        Button web = button("Power UI");
-        web.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(MineMuxRuntime.DASHBOARD_URL))));
-        root.addView(web, fullWidthButtonParams());
+        webButton = button("Power UI");
+        webButton.setOnClickListener(v -> startActivity(new Intent(this, MineMuxWebActivity.class)));
+        root.addView(webButton, fullWidthButtonParams());
 
         TextView logsTitle = sectionTitle("Recent Logs");
         root.addView(logsTitle);
@@ -157,14 +174,16 @@ public class MineMuxActivity extends Activity {
         logs.setPadding(dp(10), dp(10), dp(10), dp(10));
         root.addView(logs, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210)));
 
+        setControllerActionsEnabled(false);
+
         return scroll;
     }
 
     private TextView addMetric(LinearLayout parent, String label, String value) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(dp(12), dp(10), dp(12), dp(10));
-        row.setBackgroundColor(0xff1b241f);
+        row.setPadding(dp(14), dp(12), dp(14), dp(12));
+        row.setBackgroundColor(0xff191f1b);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         params.setMargins(0, 0, 0, dp(8));
         parent.addView(row, params);
@@ -172,7 +191,7 @@ public class MineMuxActivity extends Activity {
         TextView labelView = text(label, 12, 0xffa8b8ad, false);
         row.addView(labelView);
 
-        TextView valueView = text(value, 19, 0xffedf5ef, true);
+        TextView valueView = text(value, 20, 0xfff4f7f4, true);
         row.addView(valueView);
         return valueView;
     }
@@ -196,7 +215,7 @@ public class MineMuxActivity extends Activity {
     private Button primaryButton(String label) {
         Button button = button(label);
         button.setTextColor(0xff102014);
-        button.setBackgroundColor(0xffd8f7dd);
+        button.setBackgroundColor(0xffb8f2c6);
         return button;
     }
 
@@ -204,8 +223,8 @@ public class MineMuxActivity extends Activity {
         Button button = new Button(this);
         button.setText(label);
         button.setAllCaps(false);
-        button.setTextColor(0xffedf5ef);
-        button.setBackgroundColor(0xff26342b);
+        button.setTextColor(0xfff4f7f4);
+        button.setBackgroundColor(0xff232a26);
         return button;
     }
 
@@ -237,9 +256,12 @@ public class MineMuxActivity extends Activity {
                 JSONObject server = root.getJSONObject("server");
                 JSONObject profile = root.optJSONObject("profile");
 
+                failedPolls = 0;
+                controllerOnline = true;
+                setControllerActionsEnabled(true);
                 daemonState.setText("Online");
                 serverState.setText(server.optBoolean("running") ? "Running" : server.optBoolean("installed") ? "Ready" : "Needs Setup");
-                joinAddress.setText(server.optString("joinAddress", "-"));
+                joinAddress.setText(server.optString("joinAddress", defaultJoinAddress()));
                 version.setText(profile != null ? profile.optString("minecraftVersion", "-") : "-");
                 memory.setText(profile != null ? profile.optInt("memoryMb", 0) + " MB" : "-");
                 setNotice(server.optString("lastError", ""), server.has("lastError") && !server.optString("lastError").isEmpty());
@@ -248,8 +270,15 @@ public class MineMuxActivity extends Activity {
                 setNotice(e.getMessage(), true);
             }
         }, error -> {
+            failedPolls++;
+            controllerOnline = false;
+            setControllerActionsEnabled(false);
             daemonState.setText("Starting");
-            setNotice("Local controller is not reachable yet. Open Terminal once if this is the first install.", true);
+            if (failedPolls < 3) {
+                setNotice("Starting local controller...", false);
+            } else {
+                setNotice("Controller not reachable: " + error, true);
+            }
         });
     }
 
@@ -274,6 +303,10 @@ public class MineMuxActivity extends Activity {
     }
 
     private void postJson(String path, String json, String progress) {
+        if (!controllerOnline) {
+            setNotice("Controller is still starting. Try again in a moment.", true);
+            return;
+        }
         setNotice(progress, false);
         new Thread(() -> {
             try {
@@ -302,7 +335,7 @@ public class MineMuxActivity extends Activity {
     private String request(String path, String method, @Nullable String body) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(MineMuxRuntime.DASHBOARD_URL + path).openConnection();
         connection.setConnectTimeout(2500);
-        connection.setReadTimeout(120000);
+        connection.setReadTimeout(600000);
         connection.setRequestMethod(method);
         connection.setRequestProperty("Content-Type", "application/json");
         if (body != null) {
@@ -337,6 +370,45 @@ public class MineMuxActivity extends Activity {
         notice.setText(value == null || value.isEmpty() ? "Ready" : value);
         notice.setTextColor(error ? 0xffffb4a8 : 0xffffdca3);
         if (error && value != null && !value.isEmpty()) Toast.makeText(this, value, Toast.LENGTH_SHORT).show();
+    }
+
+    private void setControllerActionsEnabled(boolean enabled) {
+        if (setupButton == null) return;
+        setupButton.setEnabled(enabled);
+        startButton.setEnabled(enabled);
+        stopButton.setEnabled(enabled);
+        restartButton.setEnabled(enabled);
+        webButton.setEnabled(enabled);
+        float alpha = enabled ? 1.0f : 0.45f;
+        setupButton.setAlpha(alpha);
+        startButton.setAlpha(alpha);
+        stopButton.setAlpha(alpha);
+        restartButton.setAlpha(alpha);
+        webButton.setAlpha(alpha);
+    }
+
+    private String defaultJoinAddress() {
+        return localWifiIp() + ":25565";
+    }
+
+    private String localWifiIp() {
+        try {
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                NetworkInterface networkInterface = interfaces.nextElement();
+                if (!networkInterface.isUp() || networkInterface.isLoopback()) continue;
+                Enumeration<InetAddress> addresses = networkInterface.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    InetAddress address = addresses.nextElement();
+                    if (address instanceof Inet4Address && !address.isLoopbackAddress()) {
+                        return address.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Fall through to localhost below.
+        }
+        return "127.0.0.1";
     }
 
     private int dp(int value) {
