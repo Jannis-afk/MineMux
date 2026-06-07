@@ -51,12 +51,9 @@ public final class MineMuxRuntime {
             "export CRAFTNODE_WEBUI_INDEX=\"$MINEMUX_WEBUI_INDEX\"\n" +
             "mkdir -p \"$MINEMUX_HOME/logs\"\n" +
             "cd \"$HOME/minemux/daemon\"\n" +
-            "if ! command -v java >/dev/null 2>&1; then\n" +
-            "  echo \"[$(date -Is)] Installing OpenJDK for MineMux...\"\n" +
-            "  pkg install -y openjdk-25 || pkg install -y openjdk-21 || true\n" +
-            "fi\n" +
-            "if command -v update-alternatives >/dev/null 2>&1; then\n" +
-            "  update-alternatives --set java /data/data/" + TermuxConstants.TERMUX_PACKAGE_NAME + "/files/usr/opt/openjdk-25/bin/java || true\n" +
+            "if command -v curl >/dev/null 2>&1 && curl -fsS http://127.0.0.1:8787/api/health >/dev/null 2>&1; then\n" +
+            "  echo \"[$(date -Is)] MineMux daemon is already running.\"\n" +
+            "  exit 0\n" +
             "fi\n" +
             "exec ./minemux-daemon >> \"$MINEMUX_HOME/logs/daemon.log\" 2>&1\n");
         writeExecutable(bootScript,

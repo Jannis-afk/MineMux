@@ -15,6 +15,7 @@ import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 
+import com.termux.app.TermuxInstaller;
 import com.termux.app.TermuxActivity;
 
 public class MineMuxActivity extends Activity {
@@ -24,9 +25,6 @@ public class MineMuxActivity extends Activity {
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        MineMuxRuntime.ensureInstalled(this);
-        MineMuxRuntime.startDaemon(this);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -47,10 +45,7 @@ public class MineMuxActivity extends Activity {
         Button start = new Button(this);
         start.setText("Start");
         start.setOnClickListener(v -> {
-            MineMuxRuntime.ensureInstalled(this);
-            MineMuxRuntime.startDaemon(this);
-            Toast.makeText(this, "Starting MineMux daemon", Toast.LENGTH_SHORT).show();
-            webView.postDelayed(() -> webView.loadUrl(MineMuxRuntime.DASHBOARD_URL), 1200);
+            startMineMuxDaemon();
         });
         toolbar.addView(start);
 
@@ -69,5 +64,16 @@ public class MineMuxActivity extends Activity {
         root.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(root);
+
+        startMineMuxDaemon();
+    }
+
+    private void startMineMuxDaemon() {
+        TermuxInstaller.setupBootstrapIfNeeded(this, () -> {
+            MineMuxRuntime.ensureInstalled(this);
+            MineMuxRuntime.startDaemon(this);
+            Toast.makeText(this, "Starting MineMux daemon", Toast.LENGTH_SHORT).show();
+            webView.postDelayed(() -> webView.loadUrl(MineMuxRuntime.DASHBOARD_URL), 1200);
+        });
     }
 }
