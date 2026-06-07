@@ -127,6 +127,7 @@ type serverSummary struct {
 	Installed   bool          `json:"installed"`
 	Running     bool          `json:"running"`
 	JoinAddress string        `json:"joinAddress"`
+	LastRunAt   *time.Time    `json:"lastRunAt,omitempty"`
 	Profile     *profile      `json:"profile,omitempty"`
 	Server      *serverStatus `json:"server,omitempty"`
 }
@@ -157,13 +158,14 @@ type configRequest struct {
 }
 
 type statusResponse struct {
-	App       string       `json:"app"`
-	Version   string       `json:"version"`
-	StartedAt time.Time    `json:"startedAt"`
-	Paths     appPaths     `json:"paths"`
-	Profile   *profile     `json:"profile,omitempty"`
-	Server    serverStatus `json:"server"`
-	System    systemStatus `json:"system"`
+	App          string       `json:"app"`
+	Version      string       `json:"version"`
+	StartedAt    time.Time    `json:"startedAt"`
+	Paths        appPaths     `json:"paths"`
+	Profile      *profile     `json:"profile,omitempty"`
+	Server       serverStatus `json:"server"`
+	System       systemStatus `json:"system"`
+	EULAAccepted bool         `json:"eulaAccepted"`
 }
 
 type serverStatus struct {
@@ -381,6 +383,7 @@ func main() {
 	mux.HandleFunc("GET /api/catalog/loaders", a.handleLoaders)
 	mux.HandleFunc("GET /api/servers", a.handleServersList)
 	mux.HandleFunc("POST /api/servers/switch", a.handleServersSwitch)
+	mux.HandleFunc("DELETE /api/servers/", a.handleServersDelete)
 	mux.HandleFunc("GET /api/config", a.handleConfigGet)
 	mux.HandleFunc("POST /api/config", a.handleConfigPost)
 	mux.HandleFunc("POST /api/server/setup", a.handleServerSetup)
@@ -400,6 +403,8 @@ func main() {
 	mux.HandleFunc("GET /api/backups", a.handleBackupsList)
 	mux.HandleFunc("POST /api/backups/create", a.handleBackupsCreate)
 	mux.HandleFunc("POST /api/backups/restore", a.handleBackupsRestore)
+	mux.HandleFunc("GET /api/backups/download", a.handleBackupsDownload)
+	mux.HandleFunc("POST /api/backups/upload", a.handleBackupsUpload)
 	mux.HandleFunc("DELETE /api/backups/", a.handleBackupsDelete)
 	mux.HandleFunc("GET /api/diagnostics", a.handleDiagnostics)
 	mux.HandleFunc("POST /api/diagnostics/export", a.handleDiagnosticsExport)
@@ -510,6 +515,27 @@ func (a *app) profilePathFor(id string) string {
 	return filepath.Join(a.serverDir(id), "profile.json")
 }
 
+func (a *app) eulaStatePath() string {
+	return filepath.Join(a.home, "eula-accepted")
+}
+
+func (a *app) globalEULAAccepted() bool {
+	_, err := os.Stat(a.eulaStatePath())
+	return err == nil
+}
+
+func (a *app) markGlobalEULAAccepted() {
+	_ = os.WriteFile(a.eulaStatePath(), []byte("true\n"), 0o644)
+}
+
+func (a *app) loadProfileFor(id string) (*profile, error) {
+	var p profile
+	if err := readJSONFile(a.profilePathFor(id), &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
 func (a *app) profilePath() string {
 	return filepath.Join(a.paths().ServerMain, "profile.json")
 }
@@ -564,13 +590,14 @@ func (a *app) defaultProfile(mcVersion string, javaVersion int) profile {
 func (a *app) status() statusResponse {
 	p, _ := a.loadProfile()
 	return statusResponse{
-		App:       "minemux-daemon",
-		Version:   appVersion,
-		StartedAt: a.startedAt,
-		Paths:     a.paths(),
-		Profile:   p,
-		Server:    a.server.status(a),
-		System:    a.systemStatus(),
+		App:          "minemux-daemon",
+		Version:      appVersion,
+		StartedAt:    a.startedAt,
+		Paths:        a.paths(),
+		Profile:      p,
+		Server:       a.server.status(a),
+		System:       a.systemStatus(),
+		EULAAccepted: a.globalEULAAccepted(),
 	}
 }
 
@@ -1096,6 +1123,39 @@ func (a *app) handleServersSwitch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.status())
 }
 
+func (a *app) handleServersDelete(w http.ResponseWriter, r *http.Request) {
+	id := normalizeServerID(strings.TrimPrefix(r.URL.Path, "/api/servers/"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "server id is required"})
+		return
+	}
+	activeID := a.activeServerIDValue()
+	if id == activeID && a.server.status(a).Running {
+		writeJSON(w, http.StatusConflict, apiError{Error: "stop the running server before deleting it"})
+		return
+	}
+	dir := a.serverDir(id)
+	if _, err := os.Stat(dir); err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "server not found"})
+		return
+	}
+	p, _ := a.loadProfileFor(id)
+	if err := os.RemoveAll(dir); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	deletedBackups := a.deleteBackupsForServer(id, p)
+	if id == activeID {
+		nextID := a.firstExistingServerID(defaultServerID)
+		if err := a.setActiveServerID(nextID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+	}
+	servers, _ := a.listServers()
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "deletedBackups": deletedBackups, "servers": servers})
+}
+
 func (a *app) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	p, err := a.loadProfile()
 	if err != nil {
@@ -1151,6 +1211,7 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
 		return
 	}
+	req.AcceptEULA = req.AcceptEULA || a.globalEULAAccepted()
 	requestedServerID := a.activeServerIDValue()
 	if strings.TrimSpace(req.ServerID) != "" {
 		requestedServerID = normalizeServerID(req.ServerID)
@@ -1243,6 +1304,9 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 	if err := writeEULA(filepath.Join(a.paths().ServerMain, "eula.txt"), req.AcceptEULA); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
+	}
+	if req.AcceptEULA {
+		a.markGlobalEULAAccepted()
 	}
 	a.server.mu.Lock()
 	a.server.appendLogLocked("Server setup complete")
@@ -1490,6 +1554,45 @@ func (a *app) handleBackupsRestore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"restored": id})
 }
 
+func (a *app) handleBackupsDownload(w http.ResponseWriter, r *http.Request) {
+	id := filepath.Base(strings.TrimSpace(r.URL.Query().Get("id")))
+	if id == "" || id == "." {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "id query parameter is required"})
+		return
+	}
+	path := filepath.Join(a.paths().Backups, id+".zip")
+	if _, err := os.Stat(path); err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+id+`.zip"`)
+	http.ServeFile(w, r, path)
+}
+
+func (a *app) handleBackupsUpload(w http.ResponseWriter, r *http.Request) {
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "multipart field 'file' is required"})
+		return
+	}
+	defer file.Close()
+	info, err := a.importBackup(file, header)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	if r.URL.Query().Get("restore") == "true" {
+		if err := a.restoreBackup(info.ID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"imported": info, "restored": info.ID})
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
 func (a *app) handleBackupsDelete(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/backups/")
 	id = filepath.Base(id)
@@ -1567,6 +1670,7 @@ func (a *app) listServers() ([]serverSummary, error) {
 			Installed:   installed,
 			Running:     false,
 			JoinAddress: localJoinAddress(port),
+			LastRunAt:   lastRunAtForServer(dir),
 			Profile:     p,
 		}
 		if id == activeID {
@@ -1585,6 +1689,57 @@ func (a *app) listServers() ([]serverSummary, error) {
 		return summaries[i].Name < summaries[j].Name
 	})
 	return summaries, nil
+}
+
+func lastRunAtForServer(dir string) *time.Time {
+	for _, relative := range []string{"logs/latest.log", "world/session.lock", "server.properties", "profile.json"} {
+		info, err := os.Stat(filepath.Join(dir, relative))
+		if err == nil {
+			t := info.ModTime()
+			return &t
+		}
+	}
+	return nil
+}
+
+func (a *app) firstExistingServerID(fallback string) string {
+	servers, err := a.listServers()
+	if err != nil {
+		return fallback
+	}
+	for _, server := range servers {
+		if server.ID != "" {
+			return server.ID
+		}
+	}
+	return fallback
+}
+
+func (a *app) deleteBackupsForServer(id string, p *profile) int {
+	names := []string{safeName(id)}
+	if p != nil && strings.TrimSpace(p.Name) != "" {
+		names = append(names, safeName(p.Name))
+	}
+	deleted := 0
+	entries, err := os.ReadDir(a.paths().Backups)
+	if err != nil {
+		return 0
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".zip") {
+			continue
+		}
+		backupName := strings.TrimSuffix(entry.Name(), ".zip")
+		for _, name := range names {
+			if name != "" && strings.HasPrefix(backupName, name+"-") {
+				if err := os.Remove(filepath.Join(a.paths().Backups, entry.Name())); err == nil {
+					deleted++
+				}
+				break
+			}
+		}
+	}
+	return deleted
 }
 
 func loaderOptions() []loaderOption {
@@ -2231,6 +2386,49 @@ func (a *app) createBackup(reason string) (backupInfo, error) {
 		"versions":   true,
 		"logs":       true,
 	}); err != nil {
+		return backupInfo{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return backupInfo{}, err
+	}
+	return backupInfo{ID: id, Path: path, SizeBytes: info.Size(), CreatedAt: info.ModTime()}, nil
+}
+
+func (a *app) importBackup(file multipart.File, header *multipart.FileHeader) (backupInfo, error) {
+	name := filepath.Base(header.Filename)
+	if !strings.HasSuffix(strings.ToLower(name), ".zip") {
+		return backupInfo{}, errors.New("only .zip backups are supported")
+	}
+	tmp, err := os.CreateTemp(a.paths().Backups, "upload-*.zip")
+	if err != nil {
+		return backupInfo{}, err
+	}
+	tmpPath := tmp.Name()
+	if _, err := io.Copy(tmp, file); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return backupInfo{}, err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return backupInfo{}, err
+	}
+	if reader, err := zip.OpenReader(tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return backupInfo{}, errors.New("backup is not a valid zip file")
+	} else {
+		reader.Close()
+	}
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	serverName := a.activeServerIDValue()
+	if p, err := a.loadProfile(); err == nil && strings.TrimSpace(p.Name) != "" {
+		serverName = p.Name
+	}
+	id := safeName(serverName) + "-" + time.Now().UTC().Format("2006-01-02-150405") + "-uploaded-" + safeName(base)
+	path := filepath.Join(a.paths().Backups, id+".zip")
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return backupInfo{}, err
 	}
 	info, err := os.Stat(path)

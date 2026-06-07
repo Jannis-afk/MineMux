@@ -1,12 +1,20 @@
 package com.termux.app.minemux;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.database.Cursor;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.Settings;
+import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -29,7 +37,10 @@ import com.termux.app.TermuxInstaller;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -48,6 +59,8 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 public class MineMuxActivity extends Activity {
+
+    private static final int REQUEST_PICK_BACKUP_ZIP = 7110;
 
     private static final int BG = 0xff050505;
     private static final int PANEL = 0xff111111;
@@ -93,17 +106,22 @@ public class MineMuxActivity extends Activity {
     private Button serversTab;
     private Button settingsTab;
     private Button webButton;
+    private static PowerManager.WakeLock serverWakeLock;
     private String currentPage = "dashboard";
     private boolean navigatingBack;
     private long lastBackPressMs;
     private boolean controllerOnline;
     private boolean operationRunning;
+    private boolean setupProgressRunning;
     private Boolean lastDashboardInstalled;
     private Boolean lastDashboardRunning;
     private String operationMessage = "";
+    private long setupStartedAtMs;
+    private long setupEstimateMs = 300000;
     private int setupStep;
     private int failedPolls;
     private JSONObject latestStatus;
+    private JSONObject selectedServerDetail;
     private String wizardServerId = "main";
     private String wizardServerName = "Main Server";
     private String wizardVersion = "latest-compatible";
@@ -111,12 +129,14 @@ public class MineMuxActivity extends Activity {
     private int wizardMemory = 2048;
     private int wizardPlayers = 8;
     private boolean wizardEula;
+    private boolean batteryPromptShown;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(buildContent());
         startMineMuxDaemon();
+        maybeRequestBatteryOptimizationExemption();
     }
 
     @Override
@@ -129,6 +149,20 @@ public class MineMuxActivity extends Activity {
     protected void onPause() {
         super.onPause();
         mainHandler.removeCallbacks(pollStatus);
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (!activeServerRunning()) releaseServerWakeLock();
+        super.onDestroy();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_PICK_BACKUP_ZIP && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            uploadBackupAndRestore(data.getData());
+        }
     }
 
     @Override
@@ -223,9 +257,9 @@ public class MineMuxActivity extends Activity {
         content = root;
 
         LinearLayout tabs = bottomNav();
-        dashboardTab = tabButton("⌂\nDashboard", "dashboard");
-        serversTab = tabButton("▤\nServers", "servers");
-        settingsTab = tabButton("⚙\nSettings", "settings");
+        dashboardTab = tabButton("⌂", "dashboard");
+        serversTab = tabButton("▤", "servers");
+        settingsTab = tabButton("⚙", "settings");
         tabs.addView(dashboardTab, weightedTabParams());
         tabs.addView(serversTab, weightedTabParams());
         tabs.addView(settingsTab, weightedTabParams());
@@ -246,6 +280,7 @@ public class MineMuxActivity extends Activity {
         updateTabs();
         if ("setup".equals(page)) buildSetupPage();
         else if ("servers".equals(page)) buildServersPage();
+        else if ("server-detail".equals(page)) buildServerDetailPage();
         else if ("settings".equals(page)) buildSettingsPage();
         else if ("backups".equals(page)) buildBackupsPage();
         else if ("mods".equals(page)) buildModsPage();
@@ -254,30 +289,20 @@ public class MineMuxActivity extends Activity {
     }
 
     private void buildScreenChrome(String page) {
+        TextView safeTop = new TextView(this);
+        safeTop.setBackgroundColor(BG);
+        content.addView(safeTop, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(10)));
+
         LinearLayout header = row();
         header.setGravity(Gravity.CENTER_VERTICAL);
-        content.addView(header, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(70)));
+        content.addView(header, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
 
-        LinearLayout brand = row();
-        brand.setGravity(Gravity.CENTER_VERTICAL);
-        header.addView(brand, "servers".equals(page) ? new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1) : new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         TextView cubeBlock = new TextView(this);
         cubeBlock.setBackground(voxelBg());
-        LinearLayout.LayoutParams cubeBlockParams = new LinearLayout.LayoutParams(dp(36), dp(36));
-        cubeBlockParams.setMargins(0, 0, dp(12), 0);
-        brand.addView(cubeBlock, cubeBlockParams);
-        brand.addView(text(screenBrand(page), "servers".equals(page) ? 21 : 28, TEXT, true));
-
-        if ("servers".equals(page)) {
-            TextView center = text("Servers", 24, TEXT, true);
-            center.setGravity(Gravity.CENTER);
-            header.addView(center, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        }
-
-        TextView avatar = text("MM", 13, TEXT, true);
-        avatar.setGravity(Gravity.CENTER);
-        avatar.setBackground(makeBg(0xff1c1c1c, controllerOnline ? GREEN : 0xff4a4a4a, 24));
-        header.addView(avatar, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        LinearLayout.LayoutParams cubeBlockParams = new LinearLayout.LayoutParams(dp(34), dp(34));
+        cubeBlockParams.setMargins(0, 0, dp(14), 0);
+        header.addView(cubeBlock, cubeBlockParams);
+        header.addView(text(screenTitle(page), 28, TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         notice = text(controllerOnline ? "" : "Starting local controller...", 13, WARNING, false);
         notice.setPadding(dp(12), dp(8), dp(12), dp(8));
@@ -285,21 +310,27 @@ public class MineMuxActivity extends Activity {
         notice.setVisibility(controllerOnline ? View.GONE : View.VISIBLE);
         content.addView(notice);
 
-        globalProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        globalProgress.setIndeterminate(true);
-        globalProgress.setVisibility(operationRunning ? View.VISIBLE : View.GONE);
-        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4));
-        progressParams.setMargins(0, 0, 0, dp(8));
-        content.addView(globalProgress, progressParams);
+        operationPanel = null;
+        operationTitle = null;
+        operationDetail = null;
+        globalProgress = null;
+        if ("dashboard".equals(page)) {
+            globalProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+            globalProgress.setIndeterminate(!setupProgressRunning);
+            globalProgress.setVisibility(operationRunning ? View.VISIBLE : View.GONE);
+            LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4));
+            progressParams.setMargins(0, 0, 0, dp(8));
+            content.addView(globalProgress, progressParams);
 
-        operationPanel = card();
-        operationPanel.setPadding(dp(14), dp(12), dp(14), dp(12));
-        operationPanel.setVisibility(operationRunning ? View.VISIBLE : View.GONE);
-        content.addView(operationPanel, matchWrapMargin(0, dp(10), 0, dp(8)));
-        operationTitle = text(operationRunning ? "Working" : "Ready", 15, TEXT, true);
-        operationDetail = text(operationMessage, 12, MUTED, false);
-        operationPanel.addView(operationTitle);
-        operationPanel.addView(operationDetail);
+            operationPanel = card();
+            operationPanel.setPadding(dp(14), dp(12), dp(14), dp(12));
+            operationPanel.setVisibility(operationRunning ? View.VISIBLE : View.GONE);
+            content.addView(operationPanel, matchWrapMargin(0, dp(10), 0, dp(8)));
+            operationTitle = text(operationRunning ? "Working" : "Ready", 15, TEXT, true);
+            operationDetail = text(operationMessage, 12, MUTED, false);
+            operationPanel.addView(operationTitle);
+            operationPanel.addView(operationDetail);
+        }
 
         pageTitle = text(screenTitle(page), 28, TEXT, true);
         if (!"dashboard".equals(page) && !"servers".equals(page) && !"settings".equals(page)) {
@@ -315,6 +346,7 @@ public class MineMuxActivity extends Activity {
 
     private String screenTitle(String page) {
         if ("servers".equals(page)) return "Servers";
+        if ("server-detail".equals(page)) return selectedServerDetail == null ? "Server" : selectedServerDetail.optString("name", "Server");
         if ("settings".equals(page)) return "Settings";
         if ("setup".equals(page)) return "Setup Server";
         if ("backups".equals(page)) return "Backups";
@@ -324,6 +356,7 @@ public class MineMuxActivity extends Activity {
 
     private String screenSubtitle(String page) {
         if ("servers".equals(page)) return "Manage configured worlds";
+        if ("server-detail".equals(page)) return "Server details and actions";
         if ("settings".equals(page)) return "Profile, preferences, and advanced tools";
         if ("setup".equals(page)) return "Guided Android-first server setup";
         if ("backups".equals(page)) return "Restore points and rollback";
@@ -370,8 +403,14 @@ public class MineMuxActivity extends Activity {
             LinearLayout controls = row();
             live.addView(controls, matchWrapMargin(0, dp(22), 0, 0));
             Button start = activeServerRunning() ? dangerButton("■ Stop") : primaryButton("▶ Start");
-            if (activeServerRunning()) start.setOnClickListener(v -> actionButton(start, "/api/server/stop", "{}", "Stopping server..."));
-            else start.setOnClickListener(v -> actionButton(start, "/api/server/start", "{}", "Starting server..."));
+            if (activeServerRunning()) start.setOnClickListener(v -> {
+                actionButton(start, "/api/server/stop", "{}", "Stopping server...");
+                releaseServerWakeLock();
+            });
+            else start.setOnClickListener(v -> {
+                acquireServerWakeLock();
+                actionButton(start, "/api/server/start", "{}", "Starting server...");
+            });
             controls.addView(start, weightedButtonParams());
             Button restart = secondaryButton("↻ Restart");
             restart.setOnClickListener(v -> actionButton(restart, "/api/server/restart", "{}", "Restarting server..."));
@@ -506,7 +545,7 @@ public class MineMuxActivity extends Activity {
         eula.setText("I accept the Minecraft EULA");
         eula.setTextColor(TEXT);
         eula.setTextSize(15);
-        eula.setChecked(wizardEula);
+        eula.setChecked(wizardEula || eulaAlreadyAccepted());
         panel.addView(eula, matchWrapMargin(0, dp(8), 0, dp(6)));
         setupNav(panel, () -> {
             wizardEula = eula.isChecked();
@@ -514,7 +553,7 @@ public class MineMuxActivity extends Activity {
             setPage("setup");
         }, () -> {
             wizardEula = eula.isChecked();
-            if (!wizardEula) {
+            if (!wizardEula && !eulaAlreadyAccepted()) {
                 setNotice("Accept the Minecraft EULA first.", true);
                 return;
             }
@@ -527,10 +566,12 @@ public class MineMuxActivity extends Activity {
                 + "\"maxPlayers\":" + wizardPlayers + ","
                 + "\"viewDistance\":6,"
                 + "\"simulationDistance\":4,"
-                + "\"acceptEula\":true"
+                + "\"acceptEula\":" + (wizardEula || eulaAlreadyAccepted())
                 + "}";
+            beginSetupProgress();
             beginOperation("Setting up server", "Preparing DNS and Java...");
             postJson("/api/server/setup", body, "Setting up server...", () -> {
+                setupProgressRunning = false;
                 endOperation();
                 setPage("dashboard");
             });
@@ -608,17 +649,11 @@ public class MineMuxActivity extends Activity {
         pageTitle.setText("Servers");
         LinearLayout list = column();
         content.addView(list, matchWrapMargin(0, dp(14), 0, dp(8)));
-        LinearLayout countRow = row();
-        countRow.setGravity(Gravity.CENTER);
-        content.addView(countRow, matchWrapMargin(0, 0, 0, dp(10)));
-        LinearLayout detail = column();
-        content.addView(detail, matchWrap());
-        loadServersPage(list, countRow, detail);
+        loadServersListOnly(list);
     }
 
-    private void loadServersPage(LinearLayout list, LinearLayout countRow, LinearLayout detail) {
+    private void loadServersListOnly(LinearLayout list) {
         list.removeAllViews();
-        detail.removeAllViews();
         getJson("/api/servers", body -> {
             try {
                 JSONArray servers = new JSONObject(body).optJSONArray("servers");
@@ -631,53 +666,66 @@ public class MineMuxActivity extends Activity {
                         wizardServerName = "New Server";
                         setPage("setup");
                     });
-                    detail.addView(create, fullWidthButtonParams());
+                    list.addView(create, fullWidthButtonParams());
                     return;
                 }
-                JSONObject selected = servers.getJSONObject(0);
                 for (int i = 0; i < servers.length(); i++) {
                     JSONObject server = servers.getJSONObject(i);
-                    if (server.optBoolean("active")) selected = server;
+                    list.addView(serverListRow(server));
                 }
-                for (int i = 0; i < servers.length(); i++) {
-                    JSONObject server = servers.getJSONObject(i);
-                    boolean isSelected = server.optString("id").equals(selected.optString("id"));
-                    list.addView(serverListRow(server, isSelected, detail));
-                }
-                countRow.removeAllViews();
-                countRow.addView(text(servers.length() + (servers.length() == 1 ? " server" : " servers"), 14, MUTED, false));
-                renderServerDetail(detail, selected);
+                TextView count = text(servers.length() + (servers.length() == 1 ? " server" : " servers"), 14, MUTED, false);
+                count.setGravity(Gravity.CENTER);
+                list.addView(count, matchWrapMargin(0, dp(4), 0, dp(12)));
+                Button create = primaryButton("Create New Server");
+                create.setOnClickListener(v -> {
+                    setupStep = 0;
+                    wizardServerId = "server-" + System.currentTimeMillis() / 1000;
+                    wizardServerName = "New Server";
+                    setPage("setup");
+                });
+                list.addView(create, fullWidthButtonParams());
             } catch (Exception e) {
                 list.addView(emptyState(e.getMessage()));
             }
         }, error -> list.addView(emptyState(error)));
     }
 
-    private View serverListRow(JSONObject server, boolean selected, LinearLayout detail) {
+    private View serverListRow(JSONObject server) {
         LinearLayout row = row();
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(12), dp(8), dp(12), dp(8));
-        row.setBackground(makeBg(PANEL, selected ? GREEN : STROKE, 16));
-        row.setLayoutParams(matchWrapMargin(0, 0, 0, dp(10)));
-        row.addView(thumbnail(server.optBoolean("running") ? "overworld" : "cave"), new LinearLayout.LayoutParams(dp(76), dp(58)));
+        row.setPadding(dp(16), dp(14), dp(12), dp(14));
+        row.setBackground(makeBg(PANEL, server.optBoolean("active") ? GREEN : STROKE, 18));
+        row.setLayoutParams(matchWrapMargin(0, 0, 0, dp(12)));
 
         JSONObject profile = server.optJSONObject("profile");
         LinearLayout copy = column();
         LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-        copyParams.setMargins(dp(14), 0, dp(8), 0);
+        copyParams.setMargins(0, 0, dp(8), 0);
         row.addView(copy, copyParams);
         copy.addView(text(server.optString("name", server.optString("id", "Server")), 20, TEXT, true));
         String mc = profile == null ? "-" : profile.optString("minecraftVersion", "-");
         String loader = profile == null ? "-" : profile.optString("loader", "-");
-        copy.addView(text("Minecraft " + mc + "  .  " + loader, 14, MUTED, false));
+        copy.addView(text("Minecraft " + mc, 14, MUTED, false));
+        copy.addView(text(loaderLabel(profile), 14, MUTED, false));
+        copy.addView(text("Last run: " + relativeTime(server.optString("lastRunAt", "")), 13, TERTIARY, false));
         row.addView(statusPill(server.optBoolean("running") ? "Running" : server.optBoolean("installed") ? "Ready" : "Offline", server.optBoolean("running") ? GREEN : server.optBoolean("installed") ? MUTED : ERROR));
         row.addView(text(">", 22, MUTED, true));
-        row.setOnClickListener(v -> renderServerDetail(detail, server));
+        row.setOnClickListener(v -> {
+            selectedServerDetail = server;
+            setPage("server-detail");
+        });
         return row;
     }
 
+    private void buildServerDetailPage() {
+        if (selectedServerDetail == null) {
+            setPage("servers");
+            return;
+        }
+        renderServerDetail(content, selectedServerDetail);
+    }
+
     private void renderServerDetail(LinearLayout parent, JSONObject server) {
-        parent.removeAllViews();
         LinearLayout detail = glassCard();
         detail.setPadding(dp(22), dp(20), dp(22), dp(20));
         parent.addView(detail, matchWrapMargin(0, 0, 0, dp(18)));
@@ -711,7 +759,15 @@ public class MineMuxActivity extends Activity {
         LinearLayout actionsA = row();
         detail.addView(actionsA, matchWrapMargin(0, 0, 0, dp(8)));
         Button stop = server.optBoolean("running") ? dangerButton("■ Stop") : primaryButton("▶ Start");
-        stop.setOnClickListener(v -> actionButton(stop, server.optBoolean("running") ? "/api/server/stop" : "/api/server/start", "{}", server.optBoolean("running") ? "Stopping server..." : "Starting server..."));
+        stop.setOnClickListener(v -> {
+            if (server.optBoolean("running")) {
+                actionButton(stop, "/api/server/stop", "{}", "Stopping server...");
+                releaseServerWakeLock();
+            } else {
+                acquireServerWakeLock();
+                actionButton(stop, "/api/server/start", "{}", "Starting server...");
+            }
+        });
         actionsA.addView(stop, weightedButtonParams());
         Button restart = secondaryButton("↻ Restart");
         restart.setOnClickListener(v -> actionButton(restart, "/api/server/restart", "{}", "Restarting server..."));
@@ -742,6 +798,10 @@ public class MineMuxActivity extends Activity {
         CheckBox autoStart = settingCheckBox("Start on boot", "Start the active server when MineMux daemon starts.", profileFeatureBool("autoStart", false));
         settings.addView(autoStart, matchWrap());
         autoStart.setOnCheckedChangeListener((button, checked) -> postJson("/api/config", "{\"autoStart\":" + checked + "}", "Saving start setting...", () -> setNotice("Start setting saved.", false)));
+
+        Button delete = dangerButton("Delete Server + Backups");
+        delete.setOnClickListener(v -> deleteServer(server));
+        detail.addView(delete, fullWidthButtonParams());
     }
 
     private View serverRow(JSONObject server) {
@@ -902,6 +962,9 @@ public class MineMuxActivity extends Activity {
         Button rollback = secondaryButton("Rollback");
         rollback.setOnClickListener(v -> actionButton(rollback, "/api/mods/rollback", "{}", "Restoring latest backup..."));
         actions.addView(rollback, weightedButtonParams());
+        Button upload = secondaryButton("Upload");
+        upload.setOnClickListener(v -> pickBackupZip());
+        actions.addView(upload, weightedButtonParams());
 
         LinearLayout list = column();
         content.addView(list, matchWrap());
@@ -916,10 +979,10 @@ public class MineMuxActivity extends Activity {
         LinearLayout profileTop = row();
         profileTop.setGravity(Gravity.CENTER_VERTICAL);
         profile.addView(profileTop, matchWrap());
-        TextView avatar = text("MP", 24, TEXT, true);
+        TextView avatar = text("Steve", 18, TEXT, true);
         avatar.setGravity(Gravity.CENTER);
         avatar.setBackground(makeBg(0xff1c1c1c, GREEN, 36));
-        profileTop.addView(avatar, new LinearLayout.LayoutParams(dp(72), dp(72)));
+        profileTop.addView(avatar, new LinearLayout.LayoutParams(dp(92), dp(92)));
         LinearLayout identity = column();
         LinearLayout.LayoutParams identityParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
         identityParams.setMargins(dp(18), 0, dp(10), 0);
@@ -938,8 +1001,8 @@ public class MineMuxActivity extends Activity {
         profile.addView(stats, matchWrapMargin(0, dp(22), 0, 0));
         stats.addView(profileStat("▤", activeServerInstalled() ? "1" : "0", "Servers", ACCENT), weightedButtonParams());
         stats.addView(profileStat("↺", "-", "Backups", GREEN), weightedButtonParams());
-        stats.addView(profileStat("▣", diskText(), "Storage Used", PURPLE), weightedButtonParams());
-        stats.addView(profileStat("□", "Pro", "Plan", ACCENT), weightedButtonParams());
+        stats.addView(profileStat("GB", diskText(), "Cloud storage", PURPLE), weightedButtonParams());
+        stats.addView(profileStat("$", "Pro", "Subscription", ACCENT), weightedButtonParams());
 
         LinearLayout general = settingRowIcon("⚙", "General Settings", "Configure general app preferences", ACCENT, null);
         content.addView(general, matchWrapMargin(0, 0, 0, dp(18)));
@@ -950,7 +1013,7 @@ public class MineMuxActivity extends Activity {
         LinearLayout preferences = sectionCard("", "", null);
         content.addView(preferences, matchWrapMargin(0, 0, 0, dp(18)));
         preferences.addView(toggleSettingRow("●", "Notifications", "Manage push notifications", WARNING, true, null));
-        preferences.addView(toggleSettingRow("◐", "Appearance", "Dark Mode", PURPLE, true, null));
+        preferences.addView(themeSettingRow());
         preferences.addView(toggleSettingRow("▶", "Start on boot", "Start active server when daemon starts", GREEN, profileFeatureBool("autoStart", false),
             checked -> postJson("/api/config", "{\"autoStart\":" + checked + "}", "Saving start setting...", () -> setNotice("Start setting saved.", false))));
         preferences.addView(toggleSettingRow("↻", "Auto-restart", "Restart server automatically after crash", ACCENT, profileFeatureBool("restartOnCrash", true),
@@ -1021,6 +1084,16 @@ public class MineMuxActivity extends Activity {
         Button restore = secondaryButton("Restore");
         restore.setOnClickListener(v -> actionButton(restore, "/api/backups/restore?id=" + urlEncode(id), "{}", "Restoring backup..."));
         row.addView(restore, fullWidthButtonParams());
+        LinearLayout actions = row();
+        row.addView(actions, matchWrapMargin(0, dp(6), 0, 0));
+        Button download = secondaryButton("Download");
+        download.setOnClickListener(v -> downloadBackup(id));
+        actions.addView(download, weightedButtonParams());
+        Button delete = secondaryButton("Delete");
+        delete.setOnClickListener(v -> deleteJson("/api/backups/" + urlEncode(id), "Deleting backup...", () -> {
+            if ("backups".equals(currentPage)) setPage("backups");
+        }));
+        actions.addView(delete, weightedButtonParams());
         return row;
     }
 
@@ -1065,6 +1138,7 @@ public class MineMuxActivity extends Activity {
                 if ("dashboard".equals(currentPage) || operationRunning) refreshLogs();
                 boolean installedNow = server.optBoolean("installed");
                 boolean runningNow = server.optBoolean("running");
+                updateServerWakeLock(runningNow);
                 if ("dashboard".equals(currentPage)
                     && (lastDashboardInstalled == null || lastDashboardInstalled != installedNow || lastDashboardRunning == null || lastDashboardRunning != runningNow)) {
                     lastDashboardInstalled = installedNow;
@@ -1082,6 +1156,48 @@ public class MineMuxActivity extends Activity {
             if (failedPolls < 3) setNotice("Starting local controller...", false);
             else setNotice("Controller not reachable: " + error, true);
         });
+    }
+
+    private void maybeRequestBatteryOptimizationExemption() {
+        if (batteryPromptShown || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        batteryPromptShown = true;
+        try {
+            PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+            if (power != null && !power.isIgnoringBatteryOptimizations(getPackageName())) {
+                Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                intent.setData(Uri.parse("package:" + getPackageName()));
+                startActivity(intent);
+            }
+        } catch (Exception e) {
+            try {
+                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private void updateServerWakeLock(boolean running) {
+        if (running) acquireServerWakeLock();
+        else releaseServerWakeLock();
+    }
+
+    private void acquireServerWakeLock() {
+        try {
+            if (serverWakeLock != null && serverWakeLock.isHeld()) return;
+            PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+            if (power == null) return;
+            serverWakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MineMux:ServerWakeLock");
+            serverWakeLock.setReferenceCounted(false);
+            serverWakeLock.acquire();
+        } catch (Exception ignored) {}
+    }
+
+    private void releaseServerWakeLock() {
+        try {
+            if (serverWakeLock != null && serverWakeLock.isHeld()) serverWakeLock.release();
+        } catch (Exception ignored) {
+        } finally {
+            serverWakeLock = null;
+        }
     }
 
     private void refreshLogs() {
@@ -1149,14 +1265,40 @@ public class MineMuxActivity extends Activity {
     private void beginOperation(String title, String detail) {
         operationRunning = true;
         operationMessage = detail;
-        if (globalProgress != null) globalProgress.setVisibility(View.VISIBLE);
+        if (globalProgress != null) {
+            globalProgress.setIndeterminate(!setupProgressRunning);
+            globalProgress.setVisibility(View.VISIBLE);
+        }
         if (operationPanel != null) operationPanel.setVisibility(View.VISIBLE);
         if (operationTitle != null) operationTitle.setText(title == null || title.isEmpty() ? "Working" : title);
         if (operationDetail != null) operationDetail.setText(detail == null || detail.isEmpty() ? "Working..." : detail);
         setControllerActionsEnabled(false);
     }
 
+    private void beginSetupProgress() {
+        setupProgressRunning = true;
+        setupStartedAtMs = System.currentTimeMillis();
+        updateSetupProgress();
+    }
+
+    private void updateSetupProgress() {
+        if (!setupProgressRunning) return;
+        long elapsed = Math.max(0, System.currentTimeMillis() - setupStartedAtMs);
+        int percent = Math.min(95, (int) (elapsed * 100 / setupEstimateMs));
+        String detail = "Setting up server... " + percent + "%";
+        if (operationDetail != null) operationDetail.setText(detail);
+        operationMessage = detail;
+        if (globalProgress != null) {
+            globalProgress.setIndeterminate(false);
+            globalProgress.setMax(100);
+            globalProgress.setProgress(percent);
+            globalProgress.setVisibility(View.VISIBLE);
+        }
+        mainHandler.postDelayed(this::updateSetupProgress, 1500);
+    }
+
     private void endOperation() {
+        setupProgressRunning = false;
         operationRunning = false;
         operationMessage = "";
         if (globalProgress != null) globalProgress.setVisibility(View.GONE);
@@ -1189,6 +1331,135 @@ public class MineMuxActivity extends Activity {
                 });
             }
         }).start();
+    }
+
+    private void deleteJson(String path, String progress, Runnable done) {
+        setNotice(progress, false);
+        new Thread(() -> {
+            try {
+                request(path, "DELETE", null);
+                mainHandler.post(() -> {
+                    setNotice("Deleted", false);
+                    refreshStatus();
+                    done.run();
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> {
+                    setNotice(e.getMessage(), true);
+                    done.run();
+                });
+            }
+        }).start();
+    }
+
+    private void deleteServer(JSONObject server) {
+        String id = server.optString("id", "");
+        if (id.isEmpty()) return;
+        new AlertDialog.Builder(this)
+            .setTitle("Delete server?")
+            .setMessage("This deletes the server and matching backups. This cannot be undone.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete", (dialog, which) -> deleteJson("/api/servers/" + urlEncode(id), "Deleting server and backups...", () -> {
+                selectedServerDetail = null;
+                setPage("servers");
+            }))
+            .show();
+    }
+
+    private void pickBackupZip() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/zip");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip", "application/x-zip-compressed", "application/octet-stream"});
+        try {
+            startActivityForResult(intent, REQUEST_PICK_BACKUP_ZIP);
+        } catch (Exception e) {
+            intent.setType("*/*");
+            startActivityForResult(intent, REQUEST_PICK_BACKUP_ZIP);
+        }
+    }
+
+    private void downloadBackup(String id) {
+        setNotice("Downloading backup...", false);
+        new Thread(() -> {
+            try {
+                URL url = new URL(MineMuxRuntime.DASHBOARD_URL + "/api/backups/download?id=" + urlEncode(id));
+                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(600000);
+                File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                if (!downloads.exists() && !downloads.mkdirs()) throw new Exception("Could not create Downloads folder");
+                File outFile = new File(downloads, id + ".zip");
+                try (InputStream in = connection.getInputStream(); FileOutputStream out = new FileOutputStream(outFile)) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = in.read(buffer)) >= 0) out.write(buffer, 0, read);
+                }
+                mainHandler.post(() -> setNotice("Downloaded to Downloads/" + outFile.getName(), false));
+            } catch (Exception e) {
+                mainHandler.post(() -> setNotice(e.getMessage(), true));
+            }
+        }).start();
+    }
+
+    private void uploadBackupAndRestore(Uri uri) {
+        setNotice("Uploading backup...", false);
+        new Thread(() -> {
+            try {
+                String fileName = displayName(uri);
+                if (fileName == null || fileName.trim().isEmpty()) fileName = "uploaded-backup.zip";
+                if (!fileName.toLowerCase().endsWith(".zip")) fileName = fileName + ".zip";
+                String boundary = "minemux-" + System.currentTimeMillis();
+                HttpURLConnection connection = (HttpURLConnection) new URL(MineMuxRuntime.DASHBOARD_URL + "/api/backups/upload?restore=true").openConnection();
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(600000);
+                connection.setRequestMethod("POST");
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+                try (OutputStream out = connection.getOutputStream(); InputStream in = getContentResolver().openInputStream(uri)) {
+                    if (in == null) throw new Exception("Could not open selected backup");
+                    out.write(("--" + boundary + "\r\n").getBytes(StandardCharsets.UTF_8));
+                    out.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + fileName.replace("\"", "") + "\"\r\n").getBytes(StandardCharsets.UTF_8));
+                    out.write("Content-Type: application/zip\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = in.read(buffer)) >= 0) out.write(buffer, 0, read);
+                    out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+                }
+                int code = connection.getResponseCode();
+                if (code < 200 || code >= 300) throw new Exception(readError(connection));
+                mainHandler.post(() -> {
+                    setNotice("Backup uploaded and restored.", false);
+                    refreshStatus();
+                    setPage("backups");
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> setNotice(e.getMessage(), true));
+            }
+        }).start();
+    }
+
+    private String displayName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) return cursor.getString(index);
+            }
+        } catch (Exception ignored) {}
+        String path = uri.getLastPathSegment();
+        return path == null ? "uploaded-backup.zip" : path;
+    }
+
+    private String readError(HttpURLConnection connection) {
+        try (InputStream stream = connection.getErrorStream();
+             BufferedReader reader = new BufferedReader(new InputStreamReader(stream == null ? connection.getInputStream() : stream))) {
+            StringBuilder builder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) builder.append(line);
+            return builder.length() == 0 ? "Request failed" : builder.toString();
+        } catch (Exception e) {
+            return e.getMessage() == null ? "Request failed" : e.getMessage();
+        }
     }
 
     private void getJson(String path, ResultHandler success, ResultHandler failure) {
@@ -1278,6 +1549,14 @@ public class MineMuxActivity extends Activity {
         try {
             if (latestStatus == null) return false;
             return latestStatus.getJSONObject("server").optBoolean("running");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean eulaAlreadyAccepted() {
+        try {
+            return latestStatus != null && latestStatus.optBoolean("eulaAccepted", false);
         } catch (Exception e) {
             return false;
         }
@@ -1492,7 +1771,7 @@ public class MineMuxActivity extends Activity {
         button.setText(label);
         button.setContentDescription(screenTitle(page));
         button.setAllCaps(false);
-        button.setTextSize(13);
+        button.setTextSize(24);
         button.setGravity(Gravity.CENTER);
         button.setMinHeight(0);
         button.setMinimumHeight(0);
@@ -1553,9 +1832,9 @@ public class MineMuxActivity extends Activity {
     private LinearLayout bottomNav() {
         LinearLayout tabs = row();
         tabs.setGravity(Gravity.CENTER);
-        tabs.setPadding(dp(10), dp(10), dp(10), dp(10));
+        tabs.setPadding(dp(10), dp(8), dp(10), dp(8));
         tabs.setBackground(makeBg(0xff101010, STROKE, 24));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(88));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(74));
         params.setMargins(dp(20), dp(8), dp(20), dp(18));
         tabs.setLayoutParams(params);
         return tabs;
@@ -1664,6 +1943,32 @@ public class MineMuxActivity extends Activity {
         return loader + "  " + memoryText();
     }
 
+    private String loaderLabel(@Nullable JSONObject profile) {
+        if (profile == null) return "Loader: -";
+        String loader = profile.optString("loader", "-");
+        String version = profile.optString("minecraftVersion", "-");
+        return "Loader: " + loader + "  /  " + version;
+    }
+
+    private String relativeTime(String iso) {
+        if (iso == null || iso.isEmpty()) return "Never";
+        try {
+            String normalized = iso.replace("Z", "+0000");
+            java.text.SimpleDateFormat format = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", java.util.Locale.US);
+            long then = format.parse(normalized).getTime();
+            long diff = Math.max(0, System.currentTimeMillis() - then);
+            long minutes = diff / 60000;
+            if (minutes < 1) return "Just now";
+            if (minutes < 60) return minutes + "m ago";
+            long hours = minutes / 60;
+            if (hours < 24) return hours + "h ago";
+            long days = hours / 24;
+            return days + "d ago";
+        } catch (Exception e) {
+            return iso;
+        }
+    }
+
     private LinearLayout progressBar(int color, int percent) {
         LinearLayout outer = row();
         outer.setBackground(makeBg(0xff2f2f2f, 0xff2f2f2f, 99));
@@ -1764,6 +2069,14 @@ public class MineMuxActivity extends Activity {
             if (action != null) action.accept(isChecked);
         });
         row.addView(toggle);
+        return row;
+    }
+
+    private LinearLayout themeSettingRow() {
+        LinearLayout row = settingRowIcon("◐", "Theme", "Light / Dark / System", MUTED, null);
+        row.removeViewAt(row.getChildCount() - 1);
+        Spinner mode = spinner(new String[]{"System", "Dark", "Light"});
+        row.addView(mode, new LinearLayout.LayoutParams(dp(112), dp(46)));
         return row;
     }
 
