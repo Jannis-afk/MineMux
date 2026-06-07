@@ -48,15 +48,20 @@ import java.util.Map;
 
 public class MineMuxActivity extends Activity {
 
-    private static final int BG = 0xff0d1210;
-    private static final int PANEL = 0xff171f1b;
-    private static final int PANEL_ALT = 0xff202923;
-    private static final int TEXT = 0xfff3f7f4;
-    private static final int MUTED = 0xff98a69e;
-    private static final int ACCENT = 0xff9df2b3;
-    private static final int ACCENT_TEXT = 0xff102014;
-    private static final int WARNING = 0xffffd38f;
-    private static final int ERROR = 0xffffaaa0;
+    private static final int BG = 0xff07111f;
+    private static final int PANEL = 0xff101a2a;
+    private static final int PANEL_ALT = 0xff182437;
+    private static final int PANEL_SOFT = 0xff0d1726;
+    private static final int STROKE = 0xff26364f;
+    private static final int TEXT = 0xfff5f7fb;
+    private static final int MUTED = 0xff9aa8bc;
+    private static final int ACCENT = 0xff2f86ff;
+    private static final int GREEN = 0xff58df6c;
+    private static final int ACCENT_TEXT = 0xffffffff;
+    private static final int WARNING = 0xffffc857;
+    private static final int ERROR = 0xffff4d5a;
+    private static final int RED = 0xffef3f4d;
+    private static final int PURPLE = 0xffa66bff;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Map<Button, Long> buttonCooldowns = new HashMap<>();
@@ -128,7 +133,7 @@ public class MineMuxActivity extends Activity {
         scroll.setBackgroundColor(BG);
 
         LinearLayout root = column();
-        root.setPadding(dp(18), dp(16), dp(18), dp(26));
+        root.setPadding(dp(18), dp(18), dp(18), dp(18));
         scroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout header = row();
@@ -137,8 +142,14 @@ public class MineMuxActivity extends Activity {
 
         LinearLayout titleBlock = column();
         header.addView(titleBlock, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        titleBlock.addView(text("MineMux", 30, TEXT, true));
-        titleBlock.addView(text("Local Minecraft hosting", 13, MUTED, false));
+        LinearLayout brand = row();
+        brand.setGravity(Gravity.CENTER_VERTICAL);
+        titleBlock.addView(brand);
+        TextView cube = text("■", 26, GREEN, true);
+        cube.setPadding(0, 0, dp(10), 0);
+        brand.addView(cube);
+        brand.addView(text("MineMux", 30, TEXT, true));
+        titleBlock.addView(text("Phone Minecraft server", 13, MUTED, false));
 
         notice = text("Starting local controller...", 14, WARNING, false);
         notice.setPadding(0, dp(14), 0, dp(10));
@@ -147,7 +158,9 @@ public class MineMuxActivity extends Activity {
         globalProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         globalProgress.setIndeterminate(true);
         globalProgress.setVisibility(View.GONE);
-        root.addView(globalProgress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4)));
+        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4));
+        progressParams.setMargins(0, 0, 0, dp(8));
+        root.addView(globalProgress, progressParams);
 
         operationPanel = card();
         operationPanel.setPadding(dp(14), dp(12), dp(14), dp(12));
@@ -158,9 +171,9 @@ public class MineMuxActivity extends Activity {
         operationPanel.addView(operationTitle);
         operationPanel.addView(operationDetail);
 
-        LinearLayout hero = card();
-        hero.setPadding(dp(14), dp(14), dp(14), dp(14));
-        root.addView(hero, matchWrapMargin(0, dp(14), 0, dp(10)));
+        LinearLayout hero = glassCard();
+        hero.setPadding(dp(16), dp(14), dp(16), dp(14));
+        root.addView(hero, matchWrapMargin(0, dp(12), 0, dp(14)));
         daemonState = addMetric(hero, "Controller", "Starting");
         serverState = addMetric(hero, "Server", "Unknown");
         joinAddress = addMetric(hero, "Join address", defaultJoinAddress());
@@ -174,7 +187,9 @@ public class MineMuxActivity extends Activity {
         root.addView(content, matchWrap());
 
         LinearLayout tabs = row();
-        root.addView(tabs, matchWrapMargin(0, dp(14), 0, 0));
+        tabs.setPadding(dp(8), dp(8), dp(8), dp(8));
+        tabs.setBackground(makeBg(0xff0f1a2b, STROKE, 16));
+        root.addView(tabs, matchWrapMargin(0, dp(16), 0, 0));
         dashboardTab = tabButton("Dashboard", "dashboard");
         serversTab = tabButton("Servers", "servers");
         backupsTab = tabButton("Backups", "backups");
@@ -202,13 +217,13 @@ public class MineMuxActivity extends Activity {
     }
 
     private void buildDashboardPage() {
-        pageTitle.setText("Server");
+        pageTitle.setText("Dashboard");
         if (latestStatus == null || !activeServerInstalled()) {
-            LinearLayout empty = card();
-            empty.setPadding(dp(16), dp(18), dp(16), dp(18));
+            LinearLayout empty = glassCard();
+            empty.setPadding(dp(18), dp(22), dp(18), dp(22));
             content.addView(empty, matchWrapMargin(0, dp(8), 0, dp(10)));
-            empty.addView(text("No server is set up yet", 19, TEXT, true));
-            empty.addView(text("Create a phone-hosted Paper server with a guided setup. You can choose the Minecraft version, memory, and player limit before MineMux downloads the server jar.", 13, MUTED, false));
+            empty.addView(text("No server configured", 24, TEXT, true));
+            empty.addView(text("Create a phone-hosted server with a guided setup. Pick runtime, version, memory, and player limit before MineMux downloads anything.", 14, MUTED, false));
             Button setup = primaryButton("Set Up Server");
             setup.setOnClickListener(v -> {
                 setupStep = 0;
@@ -216,25 +231,40 @@ public class MineMuxActivity extends Activity {
             });
             empty.addView(setup, fullWidthButtonParams());
         } else {
-            LinearLayout live = card();
-            live.setPadding(dp(16), dp(14), dp(16), dp(14));
+            LinearLayout live = glassCard();
+            live.setPadding(dp(18), dp(18), dp(18), dp(18));
             content.addView(live, matchWrapMargin(0, dp(8), 0, dp(10)));
-            live.addView(text(activeServerRunning() ? "Live server running" : "Last server", 18, TEXT, true));
-            live.addView(text(joinAddress.getText().toString(), 22, ACCENT, true));
-            live.addView(text("Minecraft " + version.getText() + "  " + memory.getText(), 13, MUTED, false));
-            live.addView(text("Uptime " + uptimeText() + "  TPS " + tpsText() + "  Players " + playerCountText(), 13, MUTED, false));
+            LinearLayout titleRow = row();
+            titleRow.setGravity(Gravity.CENTER_VERTICAL);
+            live.addView(titleRow, matchWrap());
+            LinearLayout titleTexts = column();
+            titleRow.addView(titleTexts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            titleTexts.addView(text(activeServerName(), 25, TEXT, true));
+            titleTexts.addView(text(joinAddress.getText().toString(), 15, MUTED, false));
+            titleRow.addView(statusPill(activeServerRunning() ? "Running" : "Ready", activeServerRunning() ? GREEN : MUTED));
+            live.addView(text("Minecraft " + version.getText() + "  /  " + activeLoader() + "  /  " + memory.getText(), 14, MUTED, false));
 
             LinearLayout controls = row();
-            content.addView(controls, matchWrapMargin(0, 0, 0, dp(8)));
-            Button start = primaryButton("Start");
-            start.setOnClickListener(v -> actionButton(start, "/api/server/start", "{}", "Starting server..."));
+            live.addView(controls, matchWrapMargin(0, dp(14), 0, 0));
+            Button start = activeServerRunning() ? dangerButton("Stop") : primaryButton("Start");
+            if (activeServerRunning()) start.setOnClickListener(v -> actionButton(start, "/api/server/stop", "{}", "Stopping server..."));
+            else start.setOnClickListener(v -> actionButton(start, "/api/server/start", "{}", "Starting server..."));
             controls.addView(start, weightedButtonParams());
-            Button stop = secondaryButton("Stop");
-            stop.setOnClickListener(v -> actionButton(stop, "/api/server/stop", "{}", "Stopping server..."));
-            controls.addView(stop, weightedButtonParams());
             Button restart = secondaryButton("Restart");
             restart.setOnClickListener(v -> actionButton(restart, "/api/server/restart", "{}", "Restarting server..."));
             controls.addView(restart, weightedButtonParams());
+            Button backup = secondaryButton("Backup");
+            backup.setOnClickListener(v -> actionButton(backup, "/api/backups/create", "{}", "Creating backup..."));
+            controls.addView(backup, weightedButtonParams());
+
+            LinearLayout statsA = row();
+            content.addView(statsA, matchWrapMargin(0, 0, 0, dp(8)));
+            statsA.addView(statCard("TPS", tpsText() + " / 20", GREEN), weightedButtonParams());
+            statsA.addView(statCard("Players", playerCountText() + " / " + maxPlayersText(), ACCENT), weightedButtonParams());
+            LinearLayout statsB = row();
+            content.addView(statsB, matchWrapMargin(0, 0, 0, dp(8)));
+            statsB.addView(statCard("RAM", memory.getText().toString(), PURPLE), weightedButtonParams());
+            statsB.addView(statCard("Uptime", uptimeText(), WARNING), weightedButtonParams());
 
             LinearLayout playerActions = row();
             content.addView(playerActions, matchWrapMargin(0, 0, 0, dp(8)));
@@ -246,30 +276,31 @@ public class MineMuxActivity extends Activity {
             playerActions.addView(saveAll, weightedButtonParams());
         }
 
-        TextView serversTitle = text("Servers", 15, TEXT, true);
-        serversTitle.setPadding(0, dp(2), 0, dp(6));
+        LinearLayout activity = glassCard();
+        activity.setPadding(dp(16), dp(14), dp(16), dp(14));
+        content.addView(activity, matchWrapMargin(0, dp(8), 0, dp(10)));
+        LinearLayout activityHeader = row();
+        activityHeader.setGravity(Gravity.CENTER_VERTICAL);
+        activity.addView(activityHeader, matchWrap());
+        activityHeader.addView(text("Recent Activity", 18, TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView viewBackups = text("View backups", 13, ACCENT, true);
+        viewBackups.setOnClickListener(v -> setPage("backups"));
+        activityHeader.addView(viewBackups);
+        activity.addView(activityRow("Backup", "Create restore points before experimenting", GREEN));
+        activity.addView(activityRow("Runtime", "Use Settings for Terminal and Power UI", ACCENT));
+        logs = text("No logs yet.", 12, 0xffd9e7ff, false);
+        logs.setTypeface(Typeface.MONOSPACE);
+        logs.setBackground(makeBg(0xff08111f, STROKE, 10));
+        logs.setPadding(dp(10), dp(10), dp(10), dp(10));
+        activity.addView(logs, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150)));
+        refreshLogs();
+
+        TextView serversTitle = text("Servers", 17, TEXT, true);
+        serversTitle.setPadding(0, dp(6), 0, dp(8));
         content.addView(serversTitle);
         LinearLayout serverList = column();
         content.addView(serverList, matchWrapMargin(0, 0, 0, dp(10)));
         loadServers(serverList);
-
-        LinearLayout quick = card();
-        quick.setPadding(dp(14), dp(12), dp(14), dp(12));
-        content.addView(quick, matchWrapMargin(0, 0, 0, dp(10)));
-        quick.addView(text("Quick actions", 15, TEXT, true));
-        Button backup = secondaryButton("Create Backup");
-        backup.setOnClickListener(v -> actionButton(backup, "/api/backups/create", "{}", "Creating backup..."));
-        quick.addView(backup, fullWidthButtonParams());
-
-        TextView logsTitle = text("Recent logs", 15, TEXT, true);
-        logsTitle.setPadding(0, dp(8), 0, dp(6));
-        content.addView(logsTitle);
-        logs = text("No logs yet.", 12, 0xffd9f0dd, false);
-        logs.setTypeface(Typeface.MONOSPACE);
-        logs.setBackground(makeBg(0xff070a08, 0xff253026, 8));
-        logs.setPadding(dp(10), dp(10), dp(10), dp(10));
-        content.addView(logs, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220)));
-        refreshLogs();
     }
 
     private void buildSetupPage() {
@@ -462,14 +493,24 @@ public class MineMuxActivity extends Activity {
     }
 
     private View serverRow(JSONObject server) {
-        LinearLayout row = card();
-        row.setPadding(dp(12), dp(12), dp(12), dp(12));
+        LinearLayout row = glassCard();
+        row.setPadding(dp(14), dp(12), dp(14), dp(12));
         row.setOrientation(LinearLayout.VERTICAL);
         row.setLayoutParams(matchWrapMargin(0, 0, 0, dp(8)));
         boolean active = server.optBoolean("active");
         String id = server.optString("id", "main");
         String name = server.optString("name", id);
-        row.addView(text(name + (active ? "  Active" : ""), 14, TEXT, true));
+        LinearLayout top = row();
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(top, matchWrap());
+        LinearLayout copy = column();
+        top.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        copy.addView(text(name, 18, TEXT, true));
+        JSONObject profile = server.optJSONObject("profile");
+        String runtime = profile == null ? "-" : profile.optString("loader", "-");
+        String mc = profile == null ? "-" : profile.optString("minecraftVersion", "-");
+        copy.addView(text("Minecraft " + mc + "  /  " + runtime, 13, MUTED, false));
+        top.addView(statusPill(server.optBoolean("running") ? "Running" : active ? "Active" : server.optBoolean("installed") ? "Ready" : "Setup", server.optBoolean("running") ? GREEN : active ? ACCENT : MUTED));
         row.addView(text(server.optBoolean("installed") ? server.optString("joinAddress", "") : "Needs setup", 12, MUTED, false));
         if (!active) {
             Button use = secondaryButton("Use This Server");
@@ -594,11 +635,15 @@ public class MineMuxActivity extends Activity {
 
     private void buildBackupsPage() {
         pageTitle.setText("Backups");
-        TextView intro = text("Restore points include the active server name and backup date. MineMux creates restore points before mod changes when that setting is enabled.", 13, MUTED, false);
+        LinearLayout hero = glassCard();
+        hero.setPadding(dp(16), dp(16), dp(16), dp(16));
+        content.addView(hero, matchWrapMargin(0, dp(6), 0, dp(10)));
+        hero.addView(text("Restore points", 22, TEXT, true));
+        TextView intro = text("Backups include the server name and date, so restore points stay readable when you manage multiple worlds.", 13, MUTED, false);
         intro.setPadding(0, dp(4), 0, dp(8));
-        content.addView(intro);
+        hero.addView(intro);
         LinearLayout actions = row();
-        content.addView(actions, matchWrapMargin(0, dp(6), 0, dp(8)));
+        hero.addView(actions, matchWrapMargin(0, dp(6), 0, 0));
         Button create = primaryButton("Create");
         create.setOnClickListener(v -> actionButton(create, "/api/backups/create", "{}", "Creating backup..."));
         actions.addView(create, weightedButtonParams());
@@ -613,25 +658,20 @@ public class MineMuxActivity extends Activity {
 
     private void buildSettingsPage() {
         pageTitle.setText("Settings");
-        LinearLayout advanced = card();
-        advanced.setPadding(dp(14), dp(14), dp(14), dp(14));
-        content.addView(advanced, matchWrapMargin(0, dp(6), 0, dp(10)));
-        advanced.addView(text("Advanced tools", 16, TEXT, true));
-        advanced.addView(text("Use these only when you need shell recovery or the web power UI.", 12, MUTED, false));
-        Button terminal = secondaryButton("Open Terminal");
-        terminal.setOnClickListener(v -> startActivity(new Intent(this, TermuxActivity.class)));
-        advanced.addView(terminal, fullWidthButtonParams());
-        webButton = secondaryButton("Open Power UI");
-        webButton.setOnClickListener(v -> startActivity(new Intent(this, MineMuxWebActivity.class)));
-        advanced.addView(webButton, fullWidthButtonParams());
-
-        LinearLayout info = card();
-        info.setPadding(dp(14), dp(14), dp(14), dp(14));
+        LinearLayout info = glassCard();
+        info.setPadding(dp(16), dp(16), dp(16), dp(16));
         content.addView(info, matchWrapMargin(0, 0, 0, dp(10)));
-        info.addView(text("Runtime", 16, TEXT, true));
+        info.addView(text("MineMux Runtime", 22, TEXT, true));
         info.addView(summaryLine("Controller", controllerOnline ? "Online" : "Starting"));
         info.addView(summaryLine("Join address", joinAddress.getText().toString()));
         info.addView(summaryLine("Package", "com.termux MVP runtime"));
+        LinearLayout settings = glassCard();
+        settings.setPadding(dp(12), dp(8), dp(12), dp(8));
+        content.addView(settings, matchWrapMargin(0, 0, 0, dp(10)));
+        settings.addView(settingsRow("General", "Runtime defaults and server behavior", ACCENT, null));
+        settings.addView(settingsRow("Storage", "Backups and disk usage", WARNING, () -> setPage("backups")));
+        settings.addView(settingsRow("Terminal", "Open shell recovery", GREEN, () -> startActivity(new Intent(this, TermuxActivity.class))));
+        settings.addView(settingsRow("Power UI", "Open advanced web console", PURPLE, () -> startActivity(new Intent(this, MineMuxWebActivity.class))));
     }
 
     private void loadBackups(LinearLayout list) {
@@ -654,7 +694,7 @@ public class MineMuxActivity extends Activity {
     }
 
     private View backupRow(JSONObject backup) {
-        LinearLayout row = card();
+        LinearLayout row = glassCard();
         row.setPadding(dp(12), dp(12), dp(12), dp(12));
         row.setOrientation(LinearLayout.VERTICAL);
         row.setLayoutParams(matchWrapMargin(0, 0, 0, dp(8)));
@@ -664,6 +704,12 @@ public class MineMuxActivity extends Activity {
         Button restore = secondaryButton("Restore");
         restore.setOnClickListener(v -> actionButton(restore, "/api/backups/restore?id=" + urlEncode(id), "{}", "Restoring backup..."));
         row.addView(restore, fullWidthButtonParams());
+        return row;
+    }
+
+    private View settingsRow(String title, String subtitle, int color, @Nullable Runnable action) {
+        LinearLayout row = activityRow(title, subtitle, color);
+        if (action != null) row.setOnClickListener(v -> action.run());
         return row;
     }
 
@@ -949,6 +995,33 @@ public class MineMuxActivity extends Activity {
         }
     }
 
+    private String activeServerName() {
+        try {
+            JSONObject profile = latestStatus.optJSONObject("profile");
+            return profile == null ? "MineMux Server" : profile.optString("name", "MineMux Server");
+        } catch (Exception e) {
+            return "MineMux Server";
+        }
+    }
+
+    private String activeLoader() {
+        try {
+            JSONObject profile = latestStatus.optJSONObject("profile");
+            return profile == null ? "-" : profile.optString("loader", "-");
+        } catch (Exception e) {
+            return "-";
+        }
+    }
+
+    private String maxPlayersText() {
+        try {
+            JSONObject profile = latestStatus.optJSONObject("profile");
+            return profile == null ? "-" : String.valueOf(profile.optInt("maxPlayers", 0));
+        } catch (Exception e) {
+            return "-";
+        }
+    }
+
     private void updateTabs() {
         styleTab(dashboardTab, "dashboard".equals(currentPage));
         styleTab(serversTab, "servers".equals(currentPage));
@@ -1012,14 +1085,21 @@ public class MineMuxActivity extends Activity {
     private Button primaryButton(String label) {
         Button button = baseButton(label);
         button.setTextColor(ACCENT_TEXT);
-        button.setBackground(makeBg(ACCENT, 0xffd7ffe0, 8));
+        button.setBackground(makeBg(ACCENT, 0xff5aa5ff, 12));
+        return button;
+    }
+
+    private Button dangerButton(String label) {
+        Button button = baseButton(label);
+        button.setTextColor(0xffffffff);
+        button.setBackground(makeBg(RED, 0xffff6570, 12));
         return button;
     }
 
     private Button secondaryButton(String label) {
         Button button = baseButton(label);
         button.setTextColor(TEXT);
-        button.setBackground(makeBg(PANEL_ALT, 0xff3a493f, 8));
+        button.setBackground(makeBg(PANEL_ALT, STROKE, 12));
         return button;
     }
 
@@ -1036,8 +1116,8 @@ public class MineMuxActivity extends Activity {
 
     private void styleTab(Button button, boolean active) {
         if (button == null) return;
-        button.setTextColor(active ? ACCENT_TEXT : TEXT);
-        button.setBackground(makeBg(active ? ACCENT : PANEL_ALT, active ? 0xffd7ffe0 : 0xff39483f, 8));
+        button.setTextColor(active ? 0xffffffff : MUTED);
+        button.setBackground(makeBg(active ? ACCENT : 0x00000000, active ? 0xff5aa5ff : 0x00000000, 12));
     }
 
     private LinearLayout column() {
@@ -1054,8 +1134,53 @@ public class MineMuxActivity extends Activity {
 
     private LinearLayout card() {
         LinearLayout layout = column();
-        layout.setBackground(makeBg(PANEL, 0xff28332c, 8));
+        layout.setBackground(makeBg(PANEL, STROKE, 12));
         return layout;
+    }
+
+    private LinearLayout glassCard() {
+        LinearLayout layout = column();
+        layout.setBackground(makeBg(PANEL_SOFT, STROKE, 18));
+        return layout;
+    }
+
+    private TextView statusPill(String label, int color) {
+        TextView pill = text(label, 13, color, true);
+        pill.setGravity(Gravity.CENTER);
+        pill.setPadding(dp(12), dp(6), dp(12), dp(6));
+        int bg = color == GREEN ? 0xff102716 : 0xff182337;
+        int stroke = color == GREEN ? 0xff255d35 : STROKE;
+        pill.setBackground(makeBg(bg, stroke, 18));
+        return pill;
+    }
+
+    private LinearLayout statCard(String label, String value, int color) {
+        LinearLayout stat = glassCard();
+        stat.setPadding(dp(14), dp(12), dp(14), dp(12));
+        stat.addView(text(label, 12, MUTED, true));
+        TextView valueView = text(value, 24, color, true);
+        stat.addView(valueView);
+        TextView bar = new TextView(this);
+        bar.setBackground(makeBg(color, color, 6));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(5));
+        params.setMargins(0, dp(8), dp(28), 0);
+        stat.addView(bar, params);
+        return stat;
+    }
+
+    private LinearLayout activityRow(String title, String subtitle, int color) {
+        LinearLayout row = row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(12), 0, dp(12));
+        TextView dot = text("■", 20, color, true);
+        dot.setPadding(0, 0, dp(12), 0);
+        row.addView(dot);
+        LinearLayout copy = column();
+        row.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        copy.addView(text(title, 14, TEXT, true));
+        copy.addView(text(subtitle, 12, MUTED, false));
+        row.addView(text(">", 18, MUTED, true));
+        return row;
     }
 
     private GradientDrawable makeBg(int color, int stroke, int radius) {
