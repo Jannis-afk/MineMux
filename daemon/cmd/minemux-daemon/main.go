@@ -30,6 +30,7 @@ import (
 
 const (
 	defaultBindAddr = "127.0.0.1:8787"
+	defaultServerID = "main"
 	appVersion      = "0.3.0-dev"
 	userAgent       = "MineMux/0.1 local-mvp"
 	maxLogLines     = 600
@@ -54,9 +55,11 @@ type apiError struct {
 }
 
 type app struct {
-	startedAt time.Time
-	home      string
-	server    *serverProcess
+	startedAt      time.Time
+	home           string
+	server         *serverProcess
+	activeMu       sync.RWMutex
+	activeServerID string
 }
 
 type appPaths struct {
@@ -99,12 +102,46 @@ type profileFeatures struct {
 }
 
 type setupRequest struct {
+	ServerID           string `json:"serverId"`
+	Name               string `json:"name"`
 	MinecraftVersion   string `json:"minecraftVersion"`
+	Loader             string `json:"loader"`
 	MemoryMB           int    `json:"memoryMb"`
 	MaxPlayers         int    `json:"maxPlayers"`
 	ViewDistance       int    `json:"viewDistance"`
 	SimulationDistance int    `json:"simulationDistance"`
 	AcceptEULA         bool   `json:"acceptEula"`
+}
+
+type switchServerRequest struct {
+	ServerID string `json:"serverId"`
+}
+
+type serverSummary struct {
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Active      bool          `json:"active"`
+	Installed   bool          `json:"installed"`
+	Running     bool          `json:"running"`
+	JoinAddress string        `json:"joinAddress"`
+	Profile     *profile      `json:"profile,omitempty"`
+	Server      *serverStatus `json:"server,omitempty"`
+}
+
+type loaderOption struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Kind         string `json:"kind"`
+	Supported    bool   `json:"supported"`
+	TargetFolder string `json:"targetFolder"`
+	Description  string `json:"description"`
+}
+
+type minecraftVersionOption struct {
+	ID          string `json:"id"`
+	JavaMinimum int    `json:"javaMinimum"`
+	Support     string `json:"support"`
+	Recommended bool   `json:"recommended"`
 }
 
 type configRequest struct {
@@ -270,10 +307,12 @@ func main() {
 		log.Fatal(err)
 	}
 	a := &app{
-		startedAt: time.Now().UTC(),
-		home:      home,
-		server:    &serverProcess{},
+		startedAt:      time.Now().UTC(),
+		home:           home,
+		server:         &serverProcess{},
+		activeServerID: defaultServerID,
 	}
+	a.loadActiveServerID()
 	if err := a.ensureDirs(); err != nil {
 		log.Fatal(err)
 	}
@@ -283,6 +322,11 @@ func main() {
 	mux.HandleFunc("GET /api/health", a.handleHealth)
 	mux.HandleFunc("GET /api/status", a.handleStatus)
 	mux.HandleFunc("GET /api/device", a.handleDevice)
+	mux.HandleFunc("GET /api/server/options", a.handleServerOptions)
+	mux.HandleFunc("GET /api/catalog/minecraft-versions", a.handleMinecraftVersions)
+	mux.HandleFunc("GET /api/catalog/loaders", a.handleLoaders)
+	mux.HandleFunc("GET /api/servers", a.handleServersList)
+	mux.HandleFunc("POST /api/servers/switch", a.handleServersSwitch)
 	mux.HandleFunc("GET /api/config", a.handleConfigGet)
 	mux.HandleFunc("POST /api/config", a.handleConfigPost)
 	mux.HandleFunc("POST /api/server/setup", a.handleServerSetup)
@@ -341,7 +385,7 @@ func (a *app) paths() appPaths {
 		Daemon:       filepath.Join(a.home, "daemon"),
 		Runtime:      filepath.Join(a.home, "runtime"),
 		Servers:      filepath.Join(a.home, "servers"),
-		ServerMain:   filepath.Join(a.home, "servers", "main"),
+		ServerMain:   a.activeServerDir(),
 		Addons:       filepath.Join(a.home, "addons"),
 		Backups:      filepath.Join(a.home, "backups"),
 		Logs:         filepath.Join(a.home, "logs"),
@@ -358,6 +402,58 @@ func (a *app) ensureDirs() error {
 		}
 	}
 	return nil
+}
+
+func (a *app) activeStatePath() string {
+	return filepath.Join(a.home, "servers", "active.json")
+}
+
+func (a *app) activeServerDir() string {
+	return a.serverDir(a.activeServerIDValue())
+}
+
+func (a *app) activeServerIDValue() string {
+	a.activeMu.RLock()
+	defer a.activeMu.RUnlock()
+	if a.activeServerID == "" {
+		return defaultServerID
+	}
+	return a.activeServerID
+}
+
+func (a *app) serverDir(id string) string {
+	return filepath.Join(a.home, "servers", normalizeServerID(id))
+}
+
+func (a *app) loadActiveServerID() {
+	var state struct {
+		ActiveServerID string `json:"activeServerId"`
+	}
+	if err := readJSONFile(a.activeStatePath(), &state); err != nil {
+		return
+	}
+	id := normalizeServerID(state.ActiveServerID)
+	a.activeMu.Lock()
+	a.activeServerID = id
+	a.activeMu.Unlock()
+}
+
+func (a *app) setActiveServerID(id string) error {
+	id = normalizeServerID(id)
+	if err := os.MkdirAll(a.serverDir(id), 0o755); err != nil {
+		return err
+	}
+	if err := writeJSONFile(a.activeStatePath(), map[string]string{"activeServerId": id}); err != nil {
+		return err
+	}
+	a.activeMu.Lock()
+	a.activeServerID = id
+	a.activeMu.Unlock()
+	return nil
+}
+
+func (a *app) profilePathFor(id string) string {
+	return filepath.Join(a.serverDir(id), "profile.json")
 }
 
 func (a *app) profilePath() string {
@@ -389,7 +485,7 @@ func (a *app) defaultProfile(mcVersion string, javaVersion int) profile {
 		mcVersion = "latest-compatible"
 	}
 	return profile{
-		ID:                 "main",
+		ID:                 a.activeServerIDValue(),
 		Name:               "Main Server",
 		ServerType:         "paper",
 		MinecraftVersion:   mcVersion,
@@ -653,6 +749,70 @@ func (a *app) handleDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.deviceDiagnostics())
 }
 
+func (a *app) handleServerOptions(w http.ResponseWriter, r *http.Request) {
+	versions, source, warning := minecraftVersionOptions(detectJavaMajor())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"minecraftVersions": versions,
+		"loaders":           loaderOptions(),
+		"source":            source,
+		"warning":           warning,
+	})
+}
+
+func (a *app) handleMinecraftVersions(w http.ResponseWriter, r *http.Request) {
+	javaMajor := detectJavaMajor()
+	if value := strings.TrimSpace(r.URL.Query().Get("javaMajor")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			javaMajor = parsed
+		}
+	}
+	versions, source, warning := minecraftVersionOptions(javaMajor)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"versions":  versions,
+		"javaMajor": javaMajor,
+		"source":    source,
+		"warning":   warning,
+	})
+}
+
+func (a *app) handleLoaders(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"loaders": loaderOptions()})
+}
+
+func (a *app) handleServersList(w http.ResponseWriter, r *http.Request) {
+	servers, err := a.listServers()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activeServerId": a.activeServerIDValue(),
+		"servers":        servers,
+	})
+}
+
+func (a *app) handleServersSwitch(w http.ResponseWriter, r *http.Request) {
+	var req switchServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
+		return
+	}
+	id := normalizeServerID(req.ServerID)
+	if a.server.status(a).Running {
+		writeJSON(w, http.StatusConflict, apiError{Error: "stop the running server before switching profiles"})
+		return
+	}
+	if _, err := os.Stat(a.profilePathFor(id)); err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "server profile not found"})
+		return
+	}
+	if err := a.setActiveServerID(id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.status())
+}
+
 func (a *app) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	p, err := a.loadProfile()
 	if err != nil {
@@ -708,6 +868,28 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
 		return
 	}
+	requestedServerID := a.activeServerIDValue()
+	if strings.TrimSpace(req.ServerID) != "" {
+		requestedServerID = normalizeServerID(req.ServerID)
+	}
+	if requestedServerID != a.activeServerIDValue() {
+		if a.server.status(a).Running {
+			writeJSON(w, http.StatusConflict, apiError{Error: "stop the running server before setting up another profile"})
+			return
+		}
+		if err := a.setActiveServerID(requestedServerID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+	}
+	loader := strings.ToLower(strings.TrimSpace(req.Loader))
+	if loader == "" {
+		loader = "paper"
+	}
+	if loader != "paper" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "only Paper setup is supported in this MVP daemon"})
+		return
+	}
 	a.server.mu.Lock()
 	a.server.appendLogLocked("Checking Termux DNS resolver")
 	a.server.mu.Unlock()
@@ -737,6 +919,14 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	p := a.defaultProfile(req.MinecraftVersion, javaMajor)
+	p.ID = requestedServerID
+	if strings.TrimSpace(req.Name) != "" {
+		p.Name = strings.TrimSpace(req.Name)
+	} else if requestedServerID != defaultServerID {
+		p.Name = titleFromServerID(requestedServerID)
+	}
+	p.Loader = loader
+	p.ServerType = loader
 	if req.MemoryMB > 0 {
 		p.MemoryMB = clampInt(req.MemoryMB, 512, 8192)
 	}
@@ -750,12 +940,18 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 		p.SimulationDistance = clampInt(req.SimulationDistance, 2, 16)
 	}
 
+	a.server.mu.Lock()
+	a.server.appendLogLocked("Resolving Paper version and download")
+	a.server.mu.Unlock()
 	resolvedVersion, jarURL, sha, err := resolvePaperDownload(p.MinecraftVersion, javaMajor)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 		return
 	}
 	p.MinecraftVersion = resolvedVersion
+	a.server.mu.Lock()
+	a.server.appendLogLocked("Writing server profile for Minecraft " + resolvedVersion)
+	a.server.mu.Unlock()
 	if err := a.saveProfile(&p); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
@@ -768,10 +964,16 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
+	a.server.mu.Lock()
+	a.server.appendLogLocked("Downloading server.jar")
+	a.server.mu.Unlock()
 	if err := downloadFileWithSHA256(jarURL, a.serverJarPath(), sha); err != nil {
 		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 		return
 	}
+	a.server.mu.Lock()
+	a.server.appendLogLocked("Server setup complete")
+	a.server.mu.Unlock()
 	if err := a.ensureLockfile(&p); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
@@ -1039,6 +1241,170 @@ func (a *app) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"path": path})
+}
+
+func (a *app) listServers() ([]serverSummary, error) {
+	serversRoot := filepath.Join(a.home, "servers")
+	if err := os.MkdirAll(serversRoot, 0o755); err != nil {
+		return nil, err
+	}
+	activeID := a.activeServerIDValue()
+	seen := map[string]bool{}
+	ids := []string{activeID, defaultServerID}
+	entries, err := os.ReadDir(serversRoot)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		ids = append(ids, normalizeServerID(entry.Name()))
+	}
+	summaries := make([]serverSummary, 0, len(ids))
+	for _, rawID := range ids {
+		id := normalizeServerID(rawID)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		dir := a.serverDir(id)
+		if _, err := os.Stat(dir); err != nil {
+			continue
+		}
+		var p *profile
+		var loaded profile
+		if err := readJSONFile(filepath.Join(dir, "profile.json"), &loaded); err == nil {
+			p = &loaded
+		}
+		installed := false
+		if _, err := os.Stat(filepath.Join(dir, "server.jar")); err == nil {
+			installed = true
+		}
+		name := titleFromServerID(id)
+		port := 25565
+		if p != nil {
+			name = p.Name
+			if p.Ports.JavaTCP > 0 {
+				port = p.Ports.JavaTCP
+			}
+		}
+		summary := serverSummary{
+			ID:          id,
+			Name:        name,
+			Active:      id == activeID,
+			Installed:   installed,
+			Running:     false,
+			JoinAddress: localJoinAddress(port),
+			Profile:     p,
+		}
+		if id == activeID {
+			status := a.server.status(a)
+			summary.Running = status.Running
+			summary.Installed = status.Installed
+			summary.JoinAddress = status.JoinAddress
+			summary.Server = &status
+		}
+		summaries = append(summaries, summary)
+	}
+	sort.Slice(summaries, func(i, j int) bool {
+		if summaries[i].Active != summaries[j].Active {
+			return summaries[i].Active
+		}
+		return summaries[i].Name < summaries[j].Name
+	})
+	return summaries, nil
+}
+
+func loaderOptions() []loaderOption {
+	return []loaderOption{
+		{
+			ID:           "paper",
+			Name:         "Paper",
+			Kind:         "plugin",
+			Supported:    true,
+			TargetFolder: "plugins",
+			Description:  "Recommended phone-friendly server with Bukkit/Paper plugins.",
+		},
+		{
+			ID:           "fabric",
+			Name:         "Fabric",
+			Kind:         "mod",
+			Supported:    false,
+			TargetFolder: "mods",
+			Description:  "Planned for modded servers; not installed by this MVP daemon yet.",
+		},
+		{
+			ID:           "neoforge",
+			Name:         "NeoForge",
+			Kind:         "mod",
+			Supported:    false,
+			TargetFolder: "mods",
+			Description:  "Planned for larger mod packs; not installed by this MVP daemon yet.",
+		},
+	}
+}
+
+func minecraftVersionOptions(javaMajor int) ([]minecraftVersionOption, string, string) {
+	versions, err := fetchPaperMinecraftVersions(javaMajor)
+	if err == nil && len(versions) > 0 {
+		return versions, "papermc", ""
+	}
+	warning := ""
+	if err != nil {
+		warning = err.Error()
+	}
+	return fallbackMinecraftVersions(javaMajor), "fallback", warning
+}
+
+func fetchPaperMinecraftVersions(javaMajor int) ([]minecraftVersionOption, error) {
+	var response paperVersionsResponse
+	if err := getJSON("https://fill.papermc.io/v3/projects/paper/versions", &response); err != nil {
+		return nil, err
+	}
+	options := make([]minecraftVersionOption, 0, len(response.Versions))
+	recommendedSet := false
+	for _, entry := range response.Versions {
+		id := entry.Version.ID
+		if id == "" {
+			continue
+		}
+		minimum := entry.Version.Java.Version.Minimum
+		if javaMajor > 0 && minimum > javaMajor {
+			continue
+		}
+		option := minecraftVersionOption{
+			ID:          id,
+			JavaMinimum: minimum,
+			Support:     entry.Version.Support.Status,
+			Recommended: !recommendedSet,
+		}
+		recommendedSet = true
+		options = append(options, option)
+	}
+	return options, nil
+}
+
+func fallbackMinecraftVersions(javaMajor int) []minecraftVersionOption {
+	all := []minecraftVersionOption{
+		{ID: "1.21.6", JavaMinimum: 21, Support: "fallback"},
+		{ID: "1.21.5", JavaMinimum: 21, Support: "fallback"},
+		{ID: "1.21.4", JavaMinimum: 21, Support: "fallback"},
+		{ID: "1.21.1", JavaMinimum: 21, Support: "fallback"},
+		{ID: "1.20.6", JavaMinimum: 21, Support: "fallback"},
+		{ID: "1.20.4", JavaMinimum: 17, Support: "fallback"},
+	}
+	filtered := make([]minecraftVersionOption, 0, len(all))
+	for _, option := range all {
+		if javaMajor > 0 && option.JavaMinimum > javaMajor {
+			continue
+		}
+		if len(filtered) == 0 {
+			option.Recommended = true
+		}
+		filtered = append(filtered, option)
+	}
+	return filtered
 }
 
 func resolvePaperDownload(requestedVersion string, javaMajor int) (string, string, string, error) {
@@ -2048,6 +2414,30 @@ func safeName(value string) string {
 		return "item"
 	}
 	return out
+}
+
+func normalizeServerID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultServerID
+	}
+	id := safeName(value)
+	if id == "" || id == "item" {
+		return defaultServerID
+	}
+	return id
+}
+
+func titleFromServerID(id string) string {
+	id = normalizeServerID(id)
+	parts := strings.Split(id, "-")
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(part[:1]) + part[1:]
+	}
+	return strings.Join(parts, " ") + " Server"
 }
 
 func mustListBackups(a *app) []backupInfo {
