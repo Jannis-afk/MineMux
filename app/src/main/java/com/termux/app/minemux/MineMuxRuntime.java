@@ -21,6 +21,8 @@ import java.util.Arrays;
 public final class MineMuxRuntime {
 
     public static final String DASHBOARD_URL = "http://127.0.0.1:8787";
+    public static final String EXTRA_ACQUIRE_WAKE_LOCK = "com.termux.minemux.extra.ACQUIRE_WAKE_LOCK";
+    public static final String ACTION_REFRESH_NOTIFICATION = "com.termux.minemux.action.REFRESH_NOTIFICATION";
     private static final String TAG = "MineMuxRuntime";
 
     private MineMuxRuntime() {}
@@ -31,6 +33,7 @@ public final class MineMuxRuntime {
         File bootDir = new File(TermuxConstants.TERMUX_BOOT_SCRIPTS_DIR_PATH);
         File bin = new File(daemonDir, "minemux-daemon");
         File webui = new File(webuiDir, "index.html");
+        File webIcon = new File(webuiDir, "app-icon.png");
         File startScript = new File(daemonDir, "start-minemux.sh");
         File bootScript = new File(bootDir, "00-minemux-daemon");
 
@@ -43,6 +46,7 @@ public final class MineMuxRuntime {
 
         copyAssetIfChanged(context, "minemux/minemux-daemon", bin, true);
         copyAssetIfChanged(context, "minemux/webui/index.html", webui, false);
+        copyAssetIfChanged(context, "minemux/webui/app-icon.png", webIcon, false);
         writeExecutable(startScript,
             "#!/data/data/" + TermuxConstants.TERMUX_PACKAGE_NAME + "/files/usr/bin/sh\n" +
             "set -u\n" +
@@ -70,13 +74,24 @@ public final class MineMuxRuntime {
     public static void startDaemon(Context context) {
         ensureInstalled(context);
         File script = new File(TermuxConstants.TERMUX_HOME_DIR, "minemux/daemon/start-minemux.sh");
+        startDaemonScript(context, script, "MineMux daemon", true);
+    }
+
+    public static void startDaemonFromBoot(Context context) {
+        ensureInstalled(context);
+        File script = new File(TermuxConstants.TERMUX_HOME_DIR, "minemux/daemon/start-minemux.sh");
+        startDaemonScript(context, script, "MineMux boot", true);
+    }
+
+    private static void startDaemonScript(Context context, File script, String label, boolean acquireWakeLock) {
         Intent executeIntent = new Intent(TERMUX_SERVICE.ACTION_SERVICE_EXECUTE, new Uri.Builder()
             .scheme(TERMUX_SERVICE.URI_SCHEME_SERVICE_EXECUTE)
             .path(script.getAbsolutePath())
             .build());
         executeIntent.setClass(context, TermuxService.class);
         executeIntent.putExtra(TERMUX_SERVICE.EXTRA_BACKGROUND, true);
-        executeIntent.putExtra(TERMUX_SERVICE.EXTRA_COMMAND_LABEL, "MineMux daemon");
+        executeIntent.putExtra(TERMUX_SERVICE.EXTRA_COMMAND_LABEL, label);
+        executeIntent.putExtra(EXTRA_ACQUIRE_WAKE_LOCK, acquireWakeLock);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(executeIntent);
         } else {
@@ -92,10 +107,38 @@ public final class MineMuxRuntime {
         executeIntent.setClass(context, TermuxService.class);
         executeIntent.putExtra(TERMUX_SERVICE.EXTRA_BACKGROUND, true);
         executeIntent.putExtra(TERMUX_SERVICE.EXTRA_COMMAND_LABEL, "MineMux boot");
+        executeIntent.putExtra(EXTRA_ACQUIRE_WAKE_LOCK, true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(executeIntent);
         } else {
             context.startService(executeIntent);
+        }
+    }
+
+    public static void acquireServiceWakeLock(Context context) {
+        Intent intent = new Intent(context, TermuxService.class).setAction(TERMUX_SERVICE.ACTION_WAKE_LOCK);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent);
+        } else {
+            context.startService(intent);
+        }
+    }
+
+    public static void releaseServiceWakeLock(Context context) {
+        Intent intent = new Intent(context, TermuxService.class).setAction(TERMUX_SERVICE.ACTION_WAKE_UNLOCK);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent);
+        } else {
+            context.startService(intent);
+        }
+    }
+
+    public static void refreshServiceNotification(Context context) {
+        Intent intent = new Intent(context, TermuxService.class).setAction(ACTION_REFRESH_NOTIFICATION);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent);
+        } else {
+            context.startService(intent);
         }
     }
 

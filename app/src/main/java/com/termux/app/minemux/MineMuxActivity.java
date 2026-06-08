@@ -2,9 +2,15 @@ package com.termux.app.minemux;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.content.SharedPreferences;
+import android.content.res.Configuration;
 import android.database.Cursor;
 import android.content.Intent;
+import android.content.res.ColorStateList;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
@@ -15,22 +21,27 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.provider.OpenableColumns;
+import android.provider.MediaStore;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 
+import com.termux.R;
 import com.termux.app.TermuxActivity;
 import com.termux.app.TermuxInstaller;
 
@@ -61,34 +72,50 @@ import java.util.function.Consumer;
 public class MineMuxActivity extends Activity {
 
     private static final int REQUEST_PICK_BACKUP_ZIP = 7110;
+    private static final int REQUEST_PICK_SERVER_UPLOAD = 7111;
+    private static final int REQUEST_PICK_SETUP_JAR = 7112;
+    private static final int REQUEST_PICK_SERVER_ICON = 7113;
+    private static final int REQUEST_PICK_RESOURCE_PACK = 7114;
+    private static final String PREF_THEME_MODE = "theme_mode";
+    private static final String PREF_NOTIFICATIONS = "notifications_enabled";
+    private static final String PREF_DEFAULT_MEMORY_MB = "default_memory_mb";
+    private static final String PREF_DEFAULT_MAX_PLAYERS = "default_max_players";
+    private static final String PREF_DEFAULT_VIEW_DISTANCE = "default_view_distance";
+    private static final String PREF_DEFAULT_SIM_DISTANCE = "default_simulation_distance";
+    private static final int[] BACKUP_INTERVAL_PRESET_MINUTES = new int[]{30, 60, 180, 360, 720, 1440};
 
-    private static final int BG = 0xff050505;
-    private static final int PANEL = 0xff111111;
-    private static final int PANEL_ALT = 0xff1a1a1a;
-    private static final int PANEL_SOFT = 0xff0d0d0d;
-    private static final int STROKE = 0xff303030;
-    private static final int TEXT = 0xfff4f4f4;
-    private static final int MUTED = 0xffa8a8a8;
-    private static final int TERTIARY = 0xff737373;
-    private static final int ACCENT = 0xff0db50d;
+    private int BG = 0xff050505;
+    private int PANEL = 0xff111111;
+    private int PANEL_ALT = 0xff1a1a1a;
+    private int PANEL_SOFT = 0xff0d0d0d;
+    private int STROKE = 0xff303030;
+    private int TEXT = 0xfff4f4f4;
+    private int MUTED = 0xffa8a8a8;
+    private int TERTIARY = 0xff737373;
+    private int ACCENT = 0xff0db50d;
     private static final int GREEN = 0xff0db50d;
-    private static final int ACCENT_TEXT = 0xffffffff;
-    private static final int WARNING = 0xffd6d6d6;
-    private static final int ERROR = 0xfff4f4f4;
-    private static final int RED = 0xff202020;
-    private static final int PURPLE = 0xff8a8a8a;
+    private static final int DANGER_RED = 0xffd64040;
+    private int ACCENT_TEXT = 0xffffffff;
+    private int WARNING = 0xffd6d6d6;
+    private int ERROR = 0xfff4f4f4;
+    private int RED = 0xff202020;
+    private int PURPLE = 0xff8a8a8a;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Map<Button, Long> buttonCooldowns = new HashMap<>();
+    private final Map<String, Long> actionCooldowns = new HashMap<>();
+    private final Map<String, TextView> dashboardMetricViews = new HashMap<>();
+    private final Map<String, LinearLayout> dashboardGraphViews = new HashMap<>();
     private final ArrayList<String> pageHistory = new ArrayList<>();
     private final Runnable pollStatus = new Runnable() {
         @Override
         public void run() {
             refreshStatus();
-            mainHandler.postDelayed(this, 3000);
+            mainHandler.postDelayed(this, "dashboard".equals(currentPage) ? 1000 : 3000);
         }
     };
 
+    private ScrollView scrollView;
     private LinearLayout content;
     private TextView pageTitle;
     private TextView notice;
@@ -102,6 +129,11 @@ public class MineMuxActivity extends Activity {
     private TextView operationTitle;
     private TextView operationDetail;
     private ProgressBar globalProgress;
+    private LinearLayout setupProgressPanel;
+    private TextView setupProgressTitle;
+    private TextView setupProgressDetail;
+    private ProgressBar setupProgressBar;
+    private TextView setupLogOutput;
     private Button dashboardTab;
     private Button serversTab;
     private Button settingsTab;
@@ -113,27 +145,54 @@ public class MineMuxActivity extends Activity {
     private boolean controllerOnline;
     private boolean operationRunning;
     private boolean setupProgressRunning;
+    private boolean startingServer;
+    private boolean stoppingServer;
+    private boolean dashboardCommandFocused;
+    private long lastStartRequestedAtMs;
+    private long lastStopRequestedAtMs;
     private Boolean lastDashboardInstalled;
     private Boolean lastDashboardRunning;
     private String operationMessage = "";
     private long setupStartedAtMs;
     private long setupEstimateMs = 300000;
+    private long lowTpsSinceMs;
     private int setupStep;
     private int failedPolls;
     private JSONObject latestStatus;
     private JSONObject selectedServerDetail;
+    private SharedPreferences preferences;
+    private String themeMode = "System";
     private String wizardServerId = "main";
     private String wizardServerName = "Main Server";
     private String wizardVersion = "latest-compatible";
     private String wizardLoader = "paper";
+    private String wizardSeed = "";
+    private String wizardJarMode = "download";
+    private String wizardCustomJarId = "";
+    private String wizardCustomJarName = "";
+    private String pendingIconServerId = "";
     private int wizardMemory = 2048;
     private int wizardPlayers = 8;
+    private int wizardViewDistance = 6;
+    private int wizardSimulationDistance = 4;
     private boolean wizardEula;
+    private boolean wizardCrossplayEnabled;
+    private boolean wizardFloodgateEnabled;
+    private boolean wizardPlayitEnabled;
     private boolean batteryPromptShown;
+    private String fileBrowserPath = "";
+    private final ArrayList<Float> tpsHistory = new ArrayList<>();
+    private final ArrayList<Float> playerHistory = new ArrayList<>();
+    private final ArrayList<Float> cpuHistory = new ArrayList<>();
+    private final ArrayList<Float> memoryHistory = new ArrayList<>();
+    private final ArrayList<String> wizardPendingMods = new ArrayList<>();
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        preferences = getSharedPreferences("minemux", MODE_PRIVATE);
+        applyPaletteFromPreferences();
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         setContentView(buildContent());
         startMineMuxDaemon();
         maybeRequestBatteryOptimizationExemption();
@@ -162,6 +221,14 @@ public class MineMuxActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_PICK_BACKUP_ZIP && resultCode == RESULT_OK && data != null && data.getData() != null) {
             uploadBackupAndRestore(data.getData());
+        } else if (requestCode == REQUEST_PICK_SERVER_UPLOAD && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            uploadServerFile(data.getData(), fileBrowserPath);
+        } else if (requestCode == REQUEST_PICK_SETUP_JAR && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            uploadSetupJar(data.getData());
+        } else if (requestCode == REQUEST_PICK_SERVER_ICON && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            uploadServerIcon(data.getData(), pendingIconServerId);
+        } else if (requestCode == REQUEST_PICK_RESOURCE_PACK && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            uploadResourcePack(data.getData());
         }
     }
 
@@ -193,12 +260,13 @@ public class MineMuxActivity extends Activity {
         screen.setBackgroundColor(BG);
 
         ScrollView scroll = new ScrollView(this);
+        scrollView = scroll;
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(BG);
         screen.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         LinearLayout root = column();
-        root.setPadding(dp(24), dp(22), dp(24), dp(22));
+        root.setPadding(dp(14), dp(8), dp(14), dp(12));
         scroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout header = row();
@@ -257,9 +325,9 @@ public class MineMuxActivity extends Activity {
         content = root;
 
         LinearLayout tabs = bottomNav();
-        dashboardTab = tabButton("⌂", "dashboard");
-        serversTab = tabButton("▤", "servers");
-        settingsTab = tabButton("⚙", "settings");
+        dashboardTab = tabButton("\u2302", "dashboard");
+        serversTab = tabButton("\u25A4", "servers");
+        settingsTab = tabButton("\u2699", "settings");
         tabs.addView(dashboardTab, weightedTabParams());
         tabs.addView(serversTab, weightedTabParams());
         tabs.addView(settingsTab, weightedTabParams());
@@ -284,6 +352,7 @@ public class MineMuxActivity extends Activity {
         else if ("settings".equals(page)) buildSettingsPage();
         else if ("backups".equals(page)) buildBackupsPage();
         else if ("mods".equals(page)) buildModsPage();
+        else if ("server-files".equals(page)) buildServerFilesPage();
         else buildDashboardPage();
         setControllerActionsEnabled(controllerOnline);
     }
@@ -297,11 +366,12 @@ public class MineMuxActivity extends Activity {
         header.setGravity(Gravity.CENTER_VERTICAL);
         content.addView(header, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
 
-        TextView cubeBlock = new TextView(this);
-        cubeBlock.setBackground(voxelBg());
+        ImageView appIcon = new ImageView(this);
+        appIcon.setImageResource(getApplicationInfo().icon);
+        appIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
         LinearLayout.LayoutParams cubeBlockParams = new LinearLayout.LayoutParams(dp(34), dp(34));
         cubeBlockParams.setMargins(0, 0, dp(14), 0);
-        header.addView(cubeBlock, cubeBlockParams);
+        header.addView(appIcon, cubeBlockParams);
         header.addView(text(screenTitle(page), 28, TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         notice = text(controllerOnline ? "" : "Starting local controller...", 13, WARNING, false);
@@ -314,6 +384,11 @@ public class MineMuxActivity extends Activity {
         operationTitle = null;
         operationDetail = null;
         globalProgress = null;
+        setupProgressPanel = null;
+        setupProgressTitle = null;
+        setupProgressDetail = null;
+        setupProgressBar = null;
+        setupLogOutput = null;
         if ("dashboard".equals(page)) {
             globalProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
             globalProgress.setIndeterminate(!setupProgressRunning);
@@ -333,7 +408,8 @@ public class MineMuxActivity extends Activity {
         }
 
         pageTitle = text(screenTitle(page), 28, TEXT, true);
-        if (!"dashboard".equals(page) && !"servers".equals(page) && !"settings".equals(page)) {
+        if (!"dashboard".equals(page) && !"servers".equals(page) && !"settings".equals(page)
+            && !"setup".equals(page) && !"server-detail".equals(page) && !"backups".equals(page)) {
             pageTitle.setPadding(0, dp(6), 0, dp(8));
             content.addView(pageTitle);
         }
@@ -351,6 +427,7 @@ public class MineMuxActivity extends Activity {
         if ("setup".equals(page)) return "Setup Server";
         if ("backups".equals(page)) return "Backups";
         if ("mods".equals(page)) return "Mods";
+        if ("server-files".equals(page)) return "Files";
         return "Dashboard";
     }
 
@@ -366,6 +443,27 @@ public class MineMuxActivity extends Activity {
 
     private void buildDashboardPage() {
         pageTitle.setText("Dashboard");
+        dashboardMetricViews.clear();
+        dashboardGraphViews.clear();
+        if (useRedesignedDashboard()) {
+            if (latestStatus == null || !activeServerInstalled()) {
+                LinearLayout empty = glassCard();
+                empty.setPadding(dp(18), dp(18), dp(18), dp(18));
+                content.addView(empty, matchWrapMargin(0, dp(12), 0, dp(12)));
+                empty.addView(text("No server configured", 26, TEXT, true));
+                empty.addView(text("Create a phone-hosted server with a guided setup. Pick runtime, version, memory, and player limit before MineMux downloads anything.", 15, MUTED, false));
+                Button setup = primaryButton("Set Up Server");
+                setup.setOnClickListener(v -> {
+                    setupStep = 0;
+                    setPage("setup");
+                });
+                empty.addView(setup, fullWidthButtonParams());
+            } else {
+                content.addView(dashboardServerCard(), matchWrapMargin(0, dp(12), 0, dp(12)));
+            }
+            buildRecentActivitySection();
+            return;
+        }
         if (latestStatus == null || !activeServerInstalled()) {
             LinearLayout empty = glassCard();
             empty.setPadding(dp(24), dp(24), dp(24), dp(24));
@@ -469,17 +567,381 @@ public class MineMuxActivity extends Activity {
         refreshLogs();
     }
 
+    private boolean useRedesignedDashboard() {
+        return true;
+    }
+
+    private LinearLayout dashboardServerCard() {
+        LinearLayout live = glassCard();
+        live.setPadding(dp(16), dp(16), dp(16), dp(16));
+
+        LinearLayout titleRow = row();
+        titleRow.setGravity(Gravity.TOP);
+        live.addView(titleRow, matchWrap());
+        titleRow.addView(loaderIconView(activeLoader()), new LinearLayout.LayoutParams(dp(64), dp(58)));
+
+        LinearLayout titleTexts = column();
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        titleParams.setMargins(dp(14), 0, 0, 0);
+        titleRow.addView(titleTexts, titleParams);
+        LinearLayout nameRow = row();
+        nameRow.setGravity(Gravity.CENTER_VERTICAL);
+        titleTexts.addView(nameRow, matchWrap());
+        TextView name = text(activeServerName(), 24, TEXT, true);
+        name.setSingleLine(false);
+        name.setMaxLines(2);
+        nameRow.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        nameRow.addView(statusPill(dashboardStatusLabel(), dashboardStatusColor()));
+        titleTexts.addView(text("IP: " + joinAddressText(), 15, MUTED, false));
+        addDashboardPlayItLines(titleTexts);
+        titleTexts.addView(text("Minecraft " + versionText() + " " + activeLoader(), 14, MUTED, false));
+
+        LinearLayout controls = row();
+        live.addView(controls, matchWrapMargin(0, dp(14), 0, dp(8)));
+        Button start = iconActionButton(activeServerRunning() ? R.drawable.ic_mm_stop : R.drawable.ic_mm_play,
+            activeServerRunning() ? DANGER_RED : ACCENT, activeServerRunning() ? DANGER_RED : GREEN, 0xffffffff,
+            activeServerRunning() ? "Stop server" : "Start server");
+        start.setContentDescription(activeServerRunning() ? "Stop server" : "Start server");
+        if (activeServerRunning()) start.setOnClickListener(v -> {
+            confirmStop(start);
+        });
+        else start.setOnClickListener(v -> {
+            startServerFromUi(start);
+        });
+        controls.addView(start, weightedButtonParams());
+        Button restart = iconActionButton(R.drawable.ic_mm_restart, PANEL_ALT, STROKE, TEXT, "Restart server");
+        restart.setContentDescription("Restart server");
+        restart.setOnClickListener(v -> confirmRestart(restart));
+        controls.addView(restart, weightedButtonParams());
+        Button backup = iconActionButton(R.drawable.ic_mm_save, PANEL_ALT, STROKE, TEXT, "Create backup");
+        backup.setContentDescription("Create backup");
+        backup.setOnClickListener(v -> actionButton(backup, "/api/backups/create", "{}", "Creating backup..."));
+        controls.addView(backup, weightedButtonParams());
+        Button details = iconActionButton(R.drawable.ic_mm_info, PANEL_ALT, STROKE, TEXT, "Server details");
+        details.setContentDescription("Server details");
+        details.setOnClickListener(v -> setPage("servers"));
+        controls.addView(details, weightedButtonParams());
+
+        live.addView(metricPair(
+            metricPanel("TPS", tpsText() + " / 20", GREEN, tpsHistory, true, () -> showMetricDialog("TPS", tpsText(), GREEN, tpsHistory)),
+            metricPanel("Players", playerCountText() + " / " + maxPlayersText(), ACCENT, playerHistory, true, this::showPlayersDialog)
+        ));
+        live.addView(metricPair(
+            metricPanel("CPU", cpuText(), TEXT, cpuHistory, true, () -> showMetricDialog("CPU", cpuText(), TEXT, cpuHistory)),
+            metricPanel("Memory", ramPercentText(), PURPLE, memoryHistory, true, () -> showMetricDialog("Memory", ramPercentText(), PURPLE, memoryHistory))
+        ));
+        live.addView(metricPair(
+            metricPanel("Uptime", uptimeText(), MUTED, null, false, null),
+            metricPanel("Disk", serverDiskText(), WARNING, null, false, null)
+        ));
+        addPlayItCard(live, playItStatus(), true);
+        return live;
+    }
+
+    private void addDashboardPlayItLines(LinearLayout parent) {
+        JSONObject playit = playItStatus();
+        if (!hasPlayItOutput(playit)) return;
+        String address = playit.optString("address", "");
+        String claim = playit.optString("claimUrl", "");
+        String error = playit.optString("error", "");
+        if (!address.isEmpty()) {
+            parent.addView(text("PlayIt: " + address, 15, GREEN, true));
+        } else if (!error.isEmpty()) {
+            parent.addView(text("PlayIt: " + error, 14, DANGER_RED, true));
+        } else if (!claim.isEmpty()) {
+            parent.addView(text("PlayIt setup: claim link ready", 15, GREEN, true));
+        }
+    }
+
+    private void addServerPlayItLines(LinearLayout parent, JSONObject server) {
+        JSONObject playit = playItStatus(server);
+        if (!hasPlayItOutput(playit)) return;
+        String address = playit.optString("address", "");
+        String claim = playit.optString("claimUrl", "");
+        String error = playit.optString("error", "");
+        if (!address.isEmpty()) {
+            parent.addView(text("PlayIt: " + address, 15, GREEN, true));
+        } else if (!error.isEmpty()) {
+            parent.addView(text("PlayIt: " + error, 14, DANGER_RED, true));
+        } else if (!claim.isEmpty()) {
+            parent.addView(text("PlayIt setup pending", 15, GREEN, true));
+        }
+    }
+
+    private void addPlayItCard(LinearLayout parent, JSONObject playit, boolean compact) {
+        if (!hasPlayItOutput(playit)) return;
+        LinearLayout card = sectionCard("PlayIt.gg", "", null);
+        card.setPadding(dp(14), dp(14), dp(14), dp(14));
+        parent.addView(card, matchWrapMargin(0, compact ? dp(10) : 0, 0, dp(12)));
+
+        String address = playit.optString("address", "");
+        String claim = playit.optString("claimUrl", "");
+        String error = playit.optString("error", "");
+        if (!address.isEmpty()) {
+            card.addView(summaryLine("Public Address", address));
+            LinearLayout actions = row();
+            card.addView(actions, matchWrapMargin(0, dp(8), 0, 0));
+            Button copy = secondaryButton("Copy Address");
+            copy.setOnClickListener(v -> copyToClipboard("PlayIt address", address));
+            actions.addView(copy, weightedButtonParams());
+        } else if (!error.isEmpty()) {
+            card.addView(text(error, 13, DANGER_RED, true));
+            card.addView(text("Set the PlayIt agent/tunnel to IPv4 only in PlayIt first. If the plugin still fails, start the fallback agent here.", 12, MUTED, false));
+            if (!claim.isEmpty()) {
+                card.addView(summaryLine("Claim Link", claim));
+                LinearLayout actions = row();
+                card.addView(actions, matchWrapMargin(0, dp(8), 0, 0));
+                Button open = primaryButton("Open Claim");
+                open.setOnClickListener(v -> openUrl(claim));
+                actions.addView(open, weightedButtonParams());
+                Button copy = secondaryButton("Copy");
+                copy.setOnClickListener(v -> copyToClipboard("PlayIt claim", claim));
+                actions.addView(copy, weightedButtonParams());
+            }
+            LinearLayout fallbackActions = row();
+            card.addView(fallbackActions, matchWrapMargin(0, dp(8), 0, 0));
+            if (playit.optBoolean("running", false)) {
+                Button stopFallback = secondaryButton("Stop Fallback");
+                stopFallback.setOnClickListener(v -> actionButton(stopFallback, "/api/playit/agent/stop", "{}", "Stopping PlayIt fallback..."));
+                fallbackActions.addView(stopFallback, weightedButtonParams());
+            } else {
+                Button startFallback = secondaryButton("Start Fallback");
+                startFallback.setOnClickListener(v -> actionButton(startFallback, "/api/playit/agent/start", "{}", "Starting PlayIt fallback..."));
+                fallbackActions.addView(startFallback, weightedButtonParams());
+            }
+        } else if (!claim.isEmpty()) {
+            card.addView(text("PlayIt found a claim link. Open it once, log in, and add the agent. After PlayIt creates the tunnel, MineMux will show the public address here.", 13, MUTED, false));
+            card.addView(summaryLine("Claim Link", claim));
+            LinearLayout actions = row();
+            card.addView(actions, matchWrapMargin(0, dp(8), 0, 0));
+            Button open = primaryButton("Open Claim");
+            open.setOnClickListener(v -> openUrl(claim));
+            actions.addView(open, weightedButtonParams());
+            Button copy = secondaryButton("Copy");
+            copy.setOnClickListener(v -> copyToClipboard("PlayIt claim", claim));
+            actions.addView(copy, weightedButtonParams());
+        }
+    }
+
+    private LinearLayout metricPair(View left, View right) {
+        LinearLayout pair = row();
+        pair.addView(left, dashboardMetricParams());
+        pair.addView(right, dashboardMetricParams());
+        return pair;
+    }
+
+    private LinearLayout metricPanel(String label, String value, int color, @Nullable ArrayList<Float> history, boolean graph) {
+        return metricPanel(label, value, color, history, graph, null);
+    }
+
+    private LinearLayout metricPanel(String label, String value, int color, @Nullable ArrayList<Float> history, boolean graph, @Nullable Runnable action) {
+        LinearLayout panel = card();
+        panel.setGravity(Gravity.CENTER_VERTICAL);
+        panel.setPadding(dp(12), dp(10), dp(12), dp(10));
+        panel.addView(text(label, 12, MUTED, true));
+        TextView valueView = text(value, 20, color, true);
+        panel.addView(valueView);
+        dashboardMetricViews.put(label, valueView);
+        if (graph && history != null) {
+            LinearLayout graphView = metricGraph(history, color, 44);
+            dashboardGraphViews.put(label, graphView);
+            panel.addView(graphView, matchWrapMargin(0, dp(6), 0, 0));
+        }
+        if (action != null) panel.setOnClickListener(v -> action.run());
+        return panel;
+    }
+
+    private LinearLayout metricGraph(ArrayList<Float> history, int color, int heightDp) {
+        LinearLayout bars = row();
+        bars.setGravity(Gravity.BOTTOM);
+        bars.setMinimumHeight(dp(heightDp));
+        populateMetricGraph(bars, history, color, heightDp);
+        return bars;
+    }
+
+    private void populateMetricGraph(LinearLayout bars, ArrayList<Float> history, int color, int heightDp) {
+        bars.removeAllViews();
+        int start = Math.max(0, history.size() - 18);
+        if (history.size() <= start) {
+            for (int i = 0; i < 10; i++) bars.addView(tinyBar(color, 12 + i * 2));
+        } else {
+            for (int i = start; i < history.size(); i++) {
+                int height = clamp(Math.round(history.get(i)), 8, heightDp);
+                bars.addView(tinyBar(color, height));
+            }
+        }
+    }
+
+    private View tinyBar(int color, int heightDp) {
+        TextView bar = new TextView(this);
+        bar.setBackground(makeBg(color, color, 4));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(heightDp), 1);
+        params.setMargins(dp(1), 0, dp(1), 0);
+        bar.setLayoutParams(params);
+        bar.setAlpha(0.42f);
+        return bar;
+    }
+
+    private void showMetricDialog(String title, String value, int color, ArrayList<Float> history) {
+        LinearLayout body = column();
+        body.setPadding(dp(16), dp(12), dp(16), dp(8));
+        body.addView(text(value, 28, color, true));
+        body.addView(metricGraph(history, color, 160), matchWrapMargin(0, dp(12), 0, 0));
+        new AlertDialog.Builder(this).setTitle(title).setView(body).setPositiveButton("Close", null).show();
+    }
+
+    private void showPlayersDialog() {
+        LinearLayout body = column();
+        body.setPadding(dp(12), dp(8), dp(12), dp(8));
+        body.addView(text("Loading players...", 14, MUTED, false));
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Players").setView(body).setPositiveButton("Close", null).show();
+        getJson("/api/server/players", json -> renderPlayersDialog(body, json), error -> {
+            body.removeAllViews();
+            body.addView(text(error, 14, ERROR, false));
+        });
+    }
+
+    private void renderPlayersDialog(LinearLayout body, String json) {
+        body.removeAllViews();
+        try {
+            JSONArray players = new JSONObject(json).optJSONArray("players");
+            if (players == null || players.length() == 0) {
+                body.addView(text("No players online.", 14, MUTED, false));
+                return;
+            }
+            for (int i = 0; i < players.length(); i++) {
+                String player = players.getString(i);
+                LinearLayout row = column();
+                row.setPadding(0, dp(8), 0, dp(8));
+                row.addView(text(player, 17, TEXT, true));
+                LinearLayout actions = row();
+                row.addView(actions, matchWrapMargin(0, dp(6), 0, 0));
+                Button kick = secondaryButton("Kick");
+                kick.setOnClickListener(v -> sendPlayerCommand("kick " + player));
+                actions.addView(kick, weightedButtonParams());
+                Button survival = secondaryButton("Survival");
+                survival.setOnClickListener(v -> sendPlayerCommand("gamemode survival " + player));
+                actions.addView(survival, weightedButtonParams());
+                Button creative = secondaryButton("Creative");
+                creative.setOnClickListener(v -> sendPlayerCommand("gamemode creative " + player));
+                actions.addView(creative, weightedButtonParams());
+                Button ban = dangerButton("Ban");
+                ban.setOnClickListener(v -> sendPlayerCommand("ban " + player));
+                actions.addView(ban, weightedButtonParams());
+                body.addView(row, matchWrap());
+            }
+        } catch (Exception e) {
+            body.addView(text(e.getMessage(), 14, ERROR, false));
+        }
+    }
+
+    private void sendPlayerCommand(String command) {
+        postJson("/api/server/command", "{\"command\":\"" + escapeJson(command) + "\"}", "Sending command...", () -> refreshStatus());
+    }
+
+    private void buildRecentActivitySection() {
+        LinearLayout activity = glassCard();
+        activity.setPadding(dp(16), dp(16), dp(16), dp(16));
+        content.addView(activity, matchWrapMargin(0, 0, 0, dp(18)));
+        LinearLayout activityHeader = row();
+        activityHeader.setGravity(Gravity.CENTER_VERTICAL);
+        activity.addView(activityHeader, matchWrap());
+        activityHeader.addView(text("Recent Activity", 22, TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView viewBackups = text("Backups >", 14, ACCENT, true);
+        viewBackups.setOnClickListener(v -> setPage("backups"));
+        activityHeader.addView(viewBackups);
+
+        LinearLayout events = column();
+        activity.addView(events, matchWrapMargin(0, dp(8), 0, dp(8)));
+        loadRecentActivity(events);
+
+        logs = text("No logs yet.", 12, TEXT, false);
+        logs.setTypeface(Typeface.MONOSPACE);
+        logs.setBackground(makeBg(BG, STROKE, 10));
+        logs.setPadding(dp(10), dp(10), dp(10), dp(10));
+        activity.addView(logs, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(132)));
+
+        LinearLayout commandRow = row();
+        commandRow.setGravity(Gravity.CENTER_VERTICAL);
+        activity.addView(commandRow, matchWrapMargin(0, dp(10), 0, 0));
+        TextView keyboardSpacer = new TextView(this);
+        activity.addView(keyboardSpacer, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0));
+        EditText command = input("say Hello from MineMux");
+        command.setOnFocusChangeListener((view, focused) -> {
+            dashboardCommandFocused = focused;
+            ViewGroup.LayoutParams params = keyboardSpacer.getLayoutParams();
+            params.height = focused ? dp(320) : 0;
+            keyboardSpacer.setLayoutParams(params);
+            if (focused && scrollView != null) mainHandler.postDelayed(() -> scrollView.fullScroll(View.FOCUS_DOWN), 250);
+        });
+        commandRow.addView(command, new LinearLayout.LayoutParams(0, dp(48), 1));
+        Button send = primaryButton(">");
+        send.setContentDescription("Send command");
+        send.setOnClickListener(v -> {
+            String value = command.getText().toString().trim();
+            if (value.isEmpty()) {
+                setNotice("Type a server command first.", true);
+                return;
+            }
+            command.setText("");
+            actionButton(send, "/api/server/command", "{\"command\":\"" + escapeJson(value) + "\"}", "Sending command...");
+        });
+        commandRow.addView(send, fixedButtonParams(58));
+        refreshLogs();
+    }
+
+    private void loadRecentActivity(LinearLayout events) {
+        events.removeAllViews();
+        getJson("/api/server/logs", body -> {
+            try {
+                JSONArray lines = new JSONObject(body).optJSONArray("lines");
+                ArrayList<String> rows = new ArrayList<>();
+                if (lines != null) {
+                    for (int i = lines.length() - 1; i >= 0 && rows.size() < 3; i--) {
+                        String line = lines.optString(i, "");
+                        String lower = line.toLowerCase();
+                        if (lower.contains("joined the game")) rows.add("Player joined|" + line);
+                        else if (lower.contains("left the game")) rows.add("Player left|" + line);
+                        else if (lower.contains("backup")) rows.add("Backup activity|" + line);
+                        else if (lower.contains("server setup complete")) rows.add("Setup complete|" + line);
+                        else if (lower.contains("done") && lower.contains("for help")) rows.add("Server started|" + line);
+                    }
+                }
+                if (rows.isEmpty()) {
+                    events.addView(activityRow("Server activity", activeServerInstalled() ? "No player events yet" : "No server configured", MUTED));
+                    return;
+                }
+                for (String rowText : rows) {
+                    String[] parts = rowText.split("\\|", 2);
+                    events.addView(activityRow(parts[0], parts.length > 1 ? parts[1] : "", ACCENT));
+                }
+            } catch (Exception e) {
+                events.addView(activityRow("Activity unavailable", e.getMessage(), WARNING));
+            }
+        }, error -> events.addView(activityRow("Activity unavailable", error, WARNING)));
+    }
+
     private void buildSetupPage() {
-        pageTitle.setText("Setup server");
         LinearLayout panel = card();
         panel.setPadding(dp(14), dp(14), dp(14), dp(14));
         content.addView(panel, matchWrapMargin(0, dp(6), 0, dp(10)));
 
-        panel.addView(text("Step " + (setupStep + 1) + " of 4", 12, ACCENT, true));
+        panel.addView(text("Step " + (setupStep + 1) + " of " + setupStepCount(), 12, ACCENT, true));
         if (setupStep == 0) buildSetupNameStep(panel);
         else if (setupStep == 1) buildSetupVersionStep(panel);
         else if (setupStep == 2) buildSetupResourcesStep(panel);
+        else if (setupStep == 3) buildSetupSeedStep(panel);
+        else if (setupStep == 4) buildSetupJarStep(panel);
+        else if (setupStep == 5) buildSetupModsStep(panel);
+        else if (setupStep == 6) buildSetupCrossplayStep(panel);
+        else if (setupStep == 7) buildSetupPlayitStep(panel);
         else buildSetupConfirmStep(panel);
+
+        if (setupStep == setupStepCount() - 1) buildSetupProgressPanel();
+    }
+
+    private int setupStepCount() {
+        return 9;
     }
 
     private void buildSetupNameStep(LinearLayout panel) {
@@ -499,10 +961,10 @@ public class MineMuxActivity extends Activity {
 
     private void buildSetupVersionStep(LinearLayout panel) {
         panel.addView(text("Choose Minecraft", 19, TEXT, true));
-        panel.addView(text("Choose the runtime MineMux should install. Paper is best for plugins, Vanilla is simplest, and Forge-family loaders are for modded servers.", 13, MUTED, false));
+        panel.addView(text("Choose the runtime MineMux should install. Paper is best for plugins, Vanilla is simplest, and Fabric, Quilt, Forge, and NeoForge are for modded servers.", 13, MUTED, false));
         Spinner versionSpinner = spinner(new String[]{wizardVersion, "latest-compatible", "1.21.8", "1.21.7", "1.21.6", "1.21.5", "1.21.4", "1.20.6", "1.20.4"});
         addField(panel, "Minecraft version", versionSpinner);
-        Spinner loaderSpinner = spinner(new String[]{"paper - Paper Plugins", "vanilla - Vanilla", "quilt - Quilt Mods", "forge - Forge Mods", "neoforge - NeoForge Mods"});
+        Spinner loaderSpinner = spinner(new String[]{"paper - Paper Plugins", "vanilla - Vanilla", "fabric - Fabric Mods", "quilt - Quilt Mods", "forge - Forge Mods", "neoforge - NeoForge Mods"});
         addField(panel, "Runtime", loaderSpinner);
         loadSetupOptions(versionSpinner, loaderSpinner);
         setupNav(panel, () -> {
@@ -512,6 +974,7 @@ public class MineMuxActivity extends Activity {
             String loaderChoice = loaderSpinner.getSelectedItem().toString();
             wizardVersion = versionSpinner.getSelectedItem().toString();
             wizardLoader = loaderId(loaderChoice);
+            if (!"paper".equals(wizardLoader)) wizardPlayitEnabled = false;
             setupStep = 2;
             setPage("setup");
         }, "Next");
@@ -520,17 +983,146 @@ public class MineMuxActivity extends Activity {
     private void buildSetupResourcesStep(LinearLayout panel) {
         panel.addView(text("Tune phone resources", 19, TEXT, true));
         panel.addView(text("These defaults are conservative for a phone. Increase memory only if the phone has enough RAM free.", 13, MUTED, false));
-        EditText memoryInput = input(String.valueOf(wizardMemory));
-        addField(panel, "Memory MB", memoryInput);
-        EditText playersInput = input(String.valueOf(wizardPlayers));
-        addField(panel, "Max players", playersInput);
+        int[] ramOptions = ramSliderOptions();
+        addDiscreteSlider(panel, "Memory", ramOptions, wizardMemory, value -> wizardMemory = value, "Java heap");
+        addRangeSlider(panel, "Max players", 1, 100, wizardPlayers, value -> wizardPlayers = value, "Player slots");
+        addRangeSlider(panel, "View distance", 2, 32, wizardViewDistance, value -> wizardViewDistance = value, "Chunks sent to players");
+        addRangeSlider(panel, "Simulation distance", 2, 32, wizardSimulationDistance, value -> wizardSimulationDistance = value, "Chunks that stay active");
         setupNav(panel, () -> {
             setupStep = 1;
             setPage("setup");
         }, () -> {
-            wizardMemory = clamp(numberOr(memoryInput, 2048), 512, 8192);
-            wizardPlayers = clamp(numberOr(playersInput, 8), 1, 50);
             setupStep = 3;
+            setPage("setup");
+        }, "Next");
+    }
+
+    private void buildSetupSeedStep(LinearLayout panel) {
+        panel.addView(text("World seed", 19, TEXT, true));
+        panel.addView(text("Leave this empty for a random world. Existing worlds ignore this after first generation.", 13, MUTED, false));
+        EditText seed = input(wizardSeed);
+        addField(panel, "Seed", seed);
+        setupNav(panel, () -> {
+            wizardSeed = seed.getText().toString().trim();
+            setupStep = 2;
+            setPage("setup");
+        }, () -> {
+            wizardSeed = seed.getText().toString().trim();
+            setupStep = 4;
+            setPage("setup");
+        }, "Next");
+    }
+
+    private void buildSetupJarStep(LinearLayout panel) {
+        panel.addView(text("Server JAR source", 19, TEXT, true));
+        panel.addView(text("MineMux can download the selected runtime, or you can upload a custom server.jar.", 13, MUTED, false));
+        CheckBox custom = new CheckBox(this);
+        custom.setText("Use uploaded custom server.jar");
+        custom.setTextColor(TEXT);
+        custom.setTextSize(15);
+        custom.setChecked("custom".equals(wizardJarMode));
+        panel.addView(custom, matchWrapMargin(0, dp(8), 0, dp(6)));
+        TextView selected = text(wizardCustomJarName.isEmpty() ? "No custom JAR selected" : wizardCustomJarName, 13, MUTED, false);
+        panel.addView(selected, matchWrapMargin(0, 0, 0, dp(8)));
+        Button upload = secondaryButton("Upload .jar");
+        upload.setOnClickListener(v -> pickSetupJar());
+        panel.addView(upload, fullWidthButtonParams());
+        setupNav(panel, () -> {
+            wizardJarMode = custom.isChecked() ? "custom" : "download";
+            setupStep = 3;
+            setPage("setup");
+        }, () -> {
+            wizardJarMode = custom.isChecked() ? "custom" : "download";
+            if ("custom".equals(wizardJarMode) && wizardCustomJarId.isEmpty()) {
+                setNotice("Upload a custom .jar first, or switch back to automatic download.", true);
+                return;
+            }
+            setupStep = 5;
+            setPage("setup");
+        }, "Next");
+    }
+
+    private void buildSetupModsStep(LinearLayout panel) {
+        panel.addView(text("Recommended add-ons", 19, TEXT, true));
+        panel.addView(text("MineMux installs compatible Modrinth projects after the server runtime is ready. Incompatible picks are skipped and logged.", 13, MUTED, false));
+        for (String[] mod : recommendedSetupMods()) {
+            CheckBox box = new CheckBox(this);
+            box.setText(mod[0] + " - " + mod[2]);
+            box.setTextColor(TEXT);
+            box.setTextSize(14);
+            box.setChecked(wizardPendingMods.contains(mod[1]));
+            box.setOnCheckedChangeListener((button, checked) -> {
+                if (checked && !wizardPendingMods.contains(mod[1])) wizardPendingMods.add(mod[1]);
+                if (!checked) wizardPendingMods.remove(mod[1]);
+            });
+            panel.addView(box, matchWrapMargin(0, dp(4), 0, dp(4)));
+        }
+        setupNav(panel, () -> {
+            setupStep = 4;
+            setPage("setup");
+        }, () -> {
+            setupStep = 6;
+            setPage("setup");
+        }, "Next");
+    }
+
+    private void buildSetupCrossplayStep(LinearLayout panel) {
+        panel.addView(text("Crossplay", 19, TEXT, true));
+        panel.addView(text("Install Geyser for Bedrock clients. Floodgate allows Bedrock players to join without owning Java, where supported.", 13, MUTED, false));
+        CheckBox geyser = new CheckBox(this);
+        geyser.setText("Enable Bedrock crossplay with Geyser");
+        geyser.setTextColor(TEXT);
+        geyser.setTextSize(15);
+        geyser.setChecked(wizardCrossplayEnabled);
+        panel.addView(geyser, matchWrapMargin(0, dp(8), 0, dp(4)));
+        CheckBox floodgate = new CheckBox(this);
+        floodgate.setText("Install Floodgate");
+        floodgate.setTextColor(TEXT);
+        floodgate.setTextSize(15);
+        floodgate.setChecked(wizardFloodgateEnabled);
+        panel.addView(floodgate, matchWrapMargin(0, 0, 0, dp(4)));
+        panel.addView(text("Bedrock uses UDP port 19132. If you use PlayIt with Bedrock, the Paper plugin alone is not enough for UDP tunnels.", 12, MUTED, false));
+        setupNav(panel, () -> {
+            wizardCrossplayEnabled = geyser.isChecked();
+            wizardFloodgateEnabled = floodgate.isChecked();
+            setupStep = 5;
+            setPage("setup");
+        }, () -> {
+            wizardCrossplayEnabled = geyser.isChecked();
+            wizardFloodgateEnabled = floodgate.isChecked();
+            setupStep = 7;
+            setPage("setup");
+        }, "Next");
+    }
+
+    private void buildSetupPlayitStep(LinearLayout panel) {
+        panel.addView(text("PlayIt.gg", 19, TEXT, true));
+        if (!"paper".equals(wizardLoader)) {
+            wizardPlayitEnabled = false;
+            panel.addView(text("PlayIt plugin setup is currently offered for Paper/Spigot-style servers. Other runtimes can still use the standalone PlayIt agent later as fallback.", 13, MUTED, false));
+            setupNav(panel, () -> {
+                setupStep = 6;
+                setPage("setup");
+            }, () -> {
+                setupStep = 8;
+                setPage("setup");
+            }, "Review");
+            return;
+        }
+        panel.addView(text("MineMux installs the official PlayIt plugin jar. If PlayIt throws IPv6/control-channel errors on Android, set the PlayIt agent/tunnel to IPv4 only in PlayIt. The standalone agent remains available as fallback.", 13, MUTED, false));
+        CheckBox playit = new CheckBox(this);
+        playit.setText("Install PlayIt plugin");
+        playit.setTextColor(TEXT);
+        playit.setTextSize(15);
+        playit.setChecked(wizardPlayitEnabled);
+        panel.addView(playit, matchWrapMargin(0, dp(8), 0, dp(4)));
+        setupNav(panel, () -> {
+            wizardPlayitEnabled = playit.isChecked();
+            setupStep = 6;
+            setPage("setup");
+        }, () -> {
+            wizardPlayitEnabled = playit.isChecked();
+            setupStep = 8;
             setPage("setup");
         }, "Review");
     }
@@ -541,6 +1133,12 @@ public class MineMuxActivity extends Activity {
         panel.addView(summaryLine("Runtime", wizardLoader));
         panel.addView(summaryLine("Minecraft", wizardVersion));
         panel.addView(summaryLine("Resources", wizardMemory + " MB, " + wizardPlayers + " players"));
+        panel.addView(summaryLine("Distances", wizardViewDistance + " view, " + wizardSimulationDistance + " simulation"));
+        panel.addView(summaryLine("Seed", wizardSeed.isEmpty() ? "Random" : wizardSeed));
+        panel.addView(summaryLine("JAR", "custom".equals(wizardJarMode) ? wizardCustomJarName : "Automatic download"));
+        panel.addView(summaryLine("Add-ons", wizardPendingMods.isEmpty() ? "None" : String.valueOf(wizardPendingMods.size())));
+        panel.addView(summaryLine("Crossplay", wizardCrossplayEnabled ? "Geyser" + (wizardFloodgateEnabled ? " + Floodgate" : "") : "Off"));
+        panel.addView(summaryLine("PlayIt.gg", wizardPlayitEnabled && "paper".equals(wizardLoader) ? "Install plugin" : "Off"));
         CheckBox eula = new CheckBox(this);
         eula.setText("I accept the Minecraft EULA");
         eula.setTextColor(TEXT);
@@ -549,7 +1147,7 @@ public class MineMuxActivity extends Activity {
         panel.addView(eula, matchWrapMargin(0, dp(8), 0, dp(6)));
         setupNav(panel, () -> {
             wizardEula = eula.isChecked();
-            setupStep = 2;
+            setupStep = 7;
             setPage("setup");
         }, () -> {
             wizardEula = eula.isChecked();
@@ -562,20 +1160,89 @@ public class MineMuxActivity extends Activity {
                 + "\"name\":\"" + escapeJson(wizardServerName) + "\","
                 + "\"loader\":\"" + escapeJson(wizardLoader) + "\","
                 + "\"minecraftVersion\":\"" + escapeJson(wizardVersion) + "\","
+                + "\"seed\":\"" + escapeJson(wizardSeed) + "\","
+                + "\"jarMode\":\"" + escapeJson(wizardJarMode) + "\","
+                + "\"customJarId\":\"" + escapeJson(wizardCustomJarId) + "\","
                 + "\"memoryMb\":" + wizardMemory + ","
                 + "\"maxPlayers\":" + wizardPlayers + ","
-                + "\"viewDistance\":6,"
-                + "\"simulationDistance\":4,"
+                + "\"viewDistance\":" + wizardViewDistance + ","
+                + "\"simulationDistance\":" + wizardSimulationDistance + ","
+                + "\"pendingModrinthProjects\":" + jsonStringArray(wizardPendingMods) + ","
+                + "\"crossplay\":{\"enabled\":" + wizardCrossplayEnabled
+                + ",\"installGeyser\":" + wizardCrossplayEnabled
+                + ",\"installFloodgate\":" + wizardFloodgateEnabled
+                + ",\"floodgate\":" + wizardFloodgateEnabled
+                + ",\"bedrockUdp\":19132},"
+                + "\"playit\":{\"enabled\":" + (wizardPlayitEnabled && "paper".equals(wizardLoader)) + "},"
                 + "\"acceptEula\":" + (wizardEula || eulaAlreadyAccepted())
                 + "}";
             beginSetupProgress();
             beginOperation("Setting up server", "Preparing DNS and Java...");
-            postJson("/api/server/setup", body, "Setting up server...", () -> {
-                setupProgressRunning = false;
-                endOperation();
-                setPage("dashboard");
-            });
+            showSetupProgressPanel();
+            refreshLogs();
+            startSetupRequest(body);
         }, "Create Server");
+    }
+
+    private void buildSetupProgressPanel() {
+        setupProgressPanel = card();
+        setupProgressPanel.setPadding(dp(14), dp(12), dp(14), dp(12));
+        setupProgressPanel.setVisibility(operationRunning || setupProgressRunning ? View.VISIBLE : View.GONE);
+        content.addView(setupProgressPanel, matchWrapMargin(0, 0, 0, dp(12)));
+
+        setupProgressTitle = text("Install Output", 16, TEXT, true);
+        setupProgressDetail = text(setupProgressRunning ? setupProgressText() : "Waiting to start...", 13, MUTED, false);
+        setupProgressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        setupProgressBar.setMax(100);
+        setupProgressBar.setIndeterminate(false);
+        setupProgressBar.setProgress(setupProgressPercent());
+        setupLogOutput = text("Waiting for setup output...", 12, TEXT, false);
+        setupLogOutput.setTypeface(Typeface.MONOSPACE);
+        setupLogOutput.setBackground(makeBg(BG, STROKE, 10));
+        setupLogOutput.setPadding(dp(10), dp(10), dp(10), dp(10));
+
+        setupProgressPanel.addView(setupProgressTitle);
+        setupProgressPanel.addView(setupProgressDetail, matchWrapMargin(0, dp(4), 0, dp(8)));
+        setupProgressPanel.addView(setupProgressBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(6)));
+        setupProgressPanel.addView(setupLogOutput, matchWrapMargin(0, dp(10), 0, 0));
+    }
+
+    private void showSetupProgressPanel() {
+        if (setupProgressPanel != null) setupProgressPanel.setVisibility(View.VISIBLE);
+        if (setupProgressTitle != null) setupProgressTitle.setText("Setting up server");
+        if (setupProgressDetail != null) setupProgressDetail.setText(setupProgressText());
+        if (setupProgressBar != null) {
+            setupProgressBar.setIndeterminate(false);
+            setupProgressBar.setProgress(setupProgressPercent());
+        }
+    }
+
+    private void startSetupRequest(String body) {
+        setNotice("Setting up server...", false);
+        new Thread(() -> {
+            try {
+                request("/api/server/setup", "POST", body);
+                mainHandler.post(() -> {
+                    setupProgressRunning = false;
+                    if (setupProgressBar != null) setupProgressBar.setProgress(100);
+                    if (setupProgressDetail != null) setupProgressDetail.setText("Setup complete. Opening dashboard...");
+                    setNotice("Server setup complete.", false);
+                    refreshStatus();
+                    mainHandler.postDelayed(() -> {
+                        endOperation();
+                        setPage("dashboard");
+                    }, 500);
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> {
+                    setupProgressRunning = false;
+                    operationRunning = false;
+                    if (setupProgressDetail != null) setupProgressDetail.setText("Setup failed: " + e.getMessage());
+                    setControllerActionsEnabled(controllerOnline);
+                    setNotice(e.getMessage(), true);
+                });
+            }
+        }).start();
     }
 
     private void loadSetupOptions(Spinner versionSpinner, Spinner loaderSpinner) {
@@ -586,7 +1253,7 @@ public class MineMuxActivity extends Activity {
                 if (versions != null && versions.length() > 0) {
                     List<String> items = new ArrayList<>();
                     items.add("latest-compatible");
-                    for (int i = 0; i < Math.min(12, versions.length()); i++) {
+                    for (int i = 0; i < versions.length(); i++) {
                         String id = versions.getJSONObject(i).optString("id");
                         if (!id.isEmpty() && !items.contains(id)) items.add(id);
                     }
@@ -606,6 +1273,105 @@ public class MineMuxActivity extends Activity {
                 }
             } catch (Exception ignored) {}
         }, error -> {});
+    }
+
+    private interface IntValueConsumer {
+        void accept(int value);
+    }
+
+    private void addRangeSlider(LinearLayout parent, String label, int min, int max, int value, IntValueConsumer consumer, String subtitle) {
+        TextView readout = text(label + ": " + value + "  " + subtitle, 14, TEXT, true);
+        parent.addView(readout, matchWrapMargin(0, dp(10), 0, 0));
+        SeekBar slider = new SeekBar(this);
+        slider.setMax(max - min);
+        slider.setProgress(clamp(value, min, max) - min);
+        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                int next = min + progress;
+                consumer.accept(next);
+                readout.setText(label + ": " + next + "  " + subtitle);
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        parent.addView(slider, matchWrapMargin(0, 0, 0, dp(4)));
+    }
+
+    private void addDiscreteSlider(LinearLayout parent, String label, int[] values, int value, IntValueConsumer consumer, String subtitle) {
+        int index = closestIndex(values, value);
+        consumer.accept(values[index]);
+        TextView readout = text(label + ": " + values[index] + " MB  " + subtitle, 14, TEXT, true);
+        parent.addView(readout, matchWrapMargin(0, dp(10), 0, 0));
+        SeekBar slider = new SeekBar(this);
+        slider.setMax(Math.max(0, values.length - 1));
+        slider.setProgress(index);
+        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                int next = values[clamp(progress, 0, values.length - 1)];
+                consumer.accept(next);
+                readout.setText(label + ": " + next + " MB  " + subtitle);
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        parent.addView(slider, matchWrapMargin(0, 0, 0, dp(4)));
+    }
+
+    private int[] ramSliderOptions() {
+        int max = Math.max(1024, totalMemoryMb() * 80 / 100);
+        int[] base = new int[]{1024, 1536, 2048, 2560, 3072, 4096, 5120, 6144, 8192, 10240, 12288, 16384};
+        ArrayList<Integer> values = new ArrayList<>();
+        for (int option : base) {
+            if (option <= max) values.add(option);
+        }
+        if (values.isEmpty()) values.add(1024);
+        int[] out = new int[values.size()];
+        for (int i = 0; i < values.size(); i++) out[i] = values.get(i);
+        return out;
+    }
+
+    private int totalMemoryMb() {
+        try {
+            JSONObject system = latestStatus == null ? null : latestStatus.optJSONObject("system");
+            if (system == null) return 8192;
+            long total = system.getJSONObject("memory").optLong("totalBytes", 0);
+            return total <= 0 ? 8192 : (int) (total / 1024 / 1024);
+        } catch (Exception e) {
+            return 8192;
+        }
+    }
+
+    private int closestIndex(int[] values, int value) {
+        int best = 0;
+        int distance = Integer.MAX_VALUE;
+        for (int i = 0; i < values.length; i++) {
+            int next = Math.abs(values[i] - value);
+            if (next < distance) {
+                distance = next;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    private String[][] recommendedSetupMods() {
+        return new String[][]{
+            {"spark", "spark", "performance profiler"},
+            {"Chunky", "chunky", "pre-generate chunks"},
+            {"FerriteCore", "ferrite-core", "memory optimization"},
+            {"ModernFix", "modernfix", "performance fixes"},
+            {"Lithium", "lithium", "game logic optimization"}
+        };
+    }
+
+    private String jsonStringArray(ArrayList<String> values) {
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) out.append(',');
+            out.append('"').append(escapeJson(values.get(i))).append('"');
+        }
+        out.append(']');
+        return out.toString();
     }
 
     private void setupNav(LinearLayout panel, @Nullable Runnable back, Runnable next, String nextLabel) {
@@ -708,7 +1474,7 @@ public class MineMuxActivity extends Activity {
         copy.addView(text("Minecraft " + mc, 14, MUTED, false));
         copy.addView(text(loaderLabel(profile), 14, MUTED, false));
         copy.addView(text("Last run: " + relativeTime(server.optString("lastRunAt", "")), 13, TERTIARY, false));
-        row.addView(statusPill(server.optBoolean("running") ? "Running" : server.optBoolean("installed") ? "Ready" : "Offline", server.optBoolean("running") ? GREEN : server.optBoolean("installed") ? MUTED : ERROR));
+        row.addView(statusPill(serverStatusLabel(server), serverStatusColor(server)));
         row.addView(text(">", 22, MUTED, true));
         row.setOnClickListener(v -> {
             selectedServerDetail = server;
@@ -726,6 +1492,10 @@ public class MineMuxActivity extends Activity {
     }
 
     private void renderServerDetail(LinearLayout parent, JSONObject server) {
+        if (useRedesignedServerDetail()) {
+            renderServerDetailV2(parent, server);
+            return;
+        }
         LinearLayout detail = glassCard();
         detail.setPadding(dp(22), dp(20), dp(22), dp(20));
         parent.addView(detail, matchWrapMargin(0, 0, 0, dp(18)));
@@ -804,6 +1574,231 @@ public class MineMuxActivity extends Activity {
         detail.addView(delete, fullWidthButtonParams());
     }
 
+    private boolean useRedesignedServerDetail() {
+        return true;
+    }
+
+    private void renderServerDetailV2(LinearLayout parent, JSONObject server) {
+        JSONObject profile = server.optJSONObject("profile");
+        boolean active = server.optBoolean("active");
+        LinearLayout overview = glassCard();
+        overview.setPadding(dp(16), dp(16), dp(16), dp(16));
+        parent.addView(overview, matchWrapMargin(0, dp(8), 0, dp(12)));
+
+        LinearLayout top = row();
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        overview.addView(top, matchWrap());
+        top.addView(loaderIconView(profile == null ? "-" : profile.optString("loader", "-")), new LinearLayout.LayoutParams(dp(58), dp(52)));
+        LinearLayout status = column();
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        statusParams.setMargins(dp(14), 0, dp(8), 0);
+        top.addView(status, statusParams);
+        status.addView(statusPill(serverStatusLabel(server), serverStatusColor(server)));
+        status.addView(text(server.optString("joinAddress", joinAddressText()), 15, MUTED, false));
+        addServerPlayItLines(status, server);
+        status.addView(text("Minecraft " + (profile == null ? "-" : profile.optString("minecraftVersion", "-")) + " " + (profile == null ? "-" : profile.optString("loader", "-")), 14, MUTED, false));
+        Button copy = secondaryButton("Copy");
+        copy.setOnClickListener(v -> {
+            android.content.ClipboardManager clipboard = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (clipboard != null) clipboard.setPrimaryClip(android.content.ClipData.newPlainText("MineMux address", server.optString("joinAddress", joinAddressText())));
+            setNotice("Address copied.", false);
+        });
+        top.addView(copy, fixedButtonParams(76));
+
+        LinearLayout info = row();
+        overview.addView(info, matchWrapMargin(0, dp(14), 0, 0));
+        info.addView(infoCell("Players", (active ? playerCountText() : "0") + " / " + (profile == null ? "-" : profile.optInt("maxPlayers", 0))), weightedMetricParams());
+        info.addView(infoCell("Uptime", uptimeText()), weightedMetricParams());
+        info.addView(infoCell("Memory", profile == null ? "-" : profile.optInt("memoryMb", 0) + " MB"), weightedMetricParams());
+
+        LinearLayout actions = sectionCard("Actions", "", null);
+        parent.addView(actions, matchWrapMargin(0, 0, 0, dp(12)));
+        if (!active) {
+            TextView hint = text("This server is not active. Make it active before using power, backup, mod, or file actions.", 13, MUTED, false);
+            actions.addView(hint, matchWrapMargin(0, dp(8), 0, dp(8)));
+            Button activateOnly = primaryButton("Make Active");
+            activateOnly.setOnClickListener(v -> switchActiveServer(activateOnly, server.optString("id", "main")));
+            actions.addView(activateOnly, fullWidthButtonParams());
+        } else {
+            LinearLayout actionsA = row();
+            actions.addView(actionsA, matchWrapMargin(0, dp(8), 0, 0));
+            Button power = server.optBoolean("running") ? dangerButton("Stop") : primaryButton("Start");
+            power.setOnClickListener(v -> {
+                if (server.optBoolean("running")) {
+                    confirmStop(power);
+                } else {
+                    startServerFromUi(power);
+                }
+            });
+            actionsA.addView(power, weightedButtonParams());
+            Button restart = secondaryButton("Restart");
+            restart.setOnClickListener(v -> confirmRestart(restart));
+            actionsA.addView(restart, weightedButtonParams());
+            Button backup = secondaryButton("Backup");
+            backup.setOnClickListener(v -> actionButton(backup, "/api/backups/create", "{}", "Creating backup..."));
+            actionsA.addView(backup, weightedButtonParams());
+            LinearLayout actionsB = row();
+            actions.addView(actionsB, matchWrap());
+            Button mods = secondaryButton("Mods");
+            mods.setOnClickListener(v -> setPage("mods"));
+            actionsB.addView(mods, weightedButtonParams());
+            Button backups = secondaryButton("Backups");
+            backups.setOnClickListener(v -> setPage("backups"));
+            actionsB.addView(backups, weightedButtonParams());
+        }
+
+        addServerPropertiesSection(parent, server, profile, active);
+        addPlayItCard(parent, playItStatus(server), false);
+
+        if (active) {
+            LinearLayout backupCard = sectionCard("Backups", "View all >", () -> setPage("backups"));
+            parent.addView(backupCard, matchWrapMargin(0, 0, 0, dp(12)));
+            LinearLayout backupRows = column();
+            backupCard.addView(backupRows, matchWrapMargin(0, dp(8), 0, 0));
+            loadBackups(backupRows);
+        }
+
+        LinearLayout danger = sectionCard("Danger Zone", "", null);
+        parent.addView(danger, matchWrapMargin(0, 0, 0, dp(14)));
+        Button delete = dangerButton("Delete Server + Backups");
+        delete.setOnClickListener(v -> deleteServer(server));
+        danger.addView(delete, fullWidthButtonParams());
+    }
+
+    private void addServerPropertiesSection(LinearLayout parent, @Nullable JSONObject profile) {
+        addServerPropertiesSection(parent, selectedServerDetail, profile, true);
+    }
+
+    private void addServerPropertiesSection(LinearLayout parent, @Nullable JSONObject server, @Nullable JSONObject profile, boolean editable) {
+        LinearLayout settings = sectionCard("Server Properties", "", null);
+        parent.addView(settings, matchWrapMargin(0, 0, 0, dp(12)));
+        if (!editable) {
+            settings.addView(text("Read-only until this server is active.", 13, MUTED, false), matchWrapMargin(0, dp(8), 0, dp(8)));
+            settings.addView(summaryLine("Memory", (profile == null ? wizardMemory : profile.optInt("memoryMb", wizardMemory)) + " MB"));
+            settings.addView(summaryLine("Max Players", String.valueOf(profile == null ? wizardPlayers : profile.optInt("maxPlayers", wizardPlayers))));
+            settings.addView(summaryLine("View Distance", String.valueOf(profile == null ? 6 : profile.optInt("viewDistance", 6))));
+            settings.addView(summaryLine("Simulation Distance", String.valueOf(profile == null ? 4 : profile.optInt("simulationDistance", 4))));
+            settings.addView(summaryLine("MOTD", profileProperty(profile, "motd", "MineMux server")));
+            settings.addView(summaryLine("Seed", profile == null ? "-" : profile.optString("seed", profileProperty(profile, "level-seed", "-"))));
+        } else {
+            settings.addView(configNumberRow("Memory MB", "memoryMb", profile == null ? wizardMemory : profile.optInt("memoryMb", wizardMemory), 512, 8192, "Maximum Java heap allocated to this server."));
+            settings.addView(configNumberRow("Max Players", "maxPlayers", profile == null ? wizardPlayers : profile.optInt("maxPlayers", wizardPlayers), 1, 100, "Maximum player slots shown by the server."));
+            settings.addView(configNumberRow("Render Distance", "viewDistance", profile == null ? 6 : profile.optInt("viewDistance", 6), 2, 32, "Chunk view distance. Lower values are safer on phones."));
+            settings.addView(configNumberRow("Simulation Distance", "simulationDistance", profile == null ? 4 : profile.optInt("simulationDistance", 4), 2, 32, "Distance where mobs, redstone, and world simulation stay active."));
+            settings.addView(configTextRow("MOTD", "motd", profileProperty(profile, "motd", "MineMux server"), "Message shown in the Minecraft server list."));
+            settings.addView(configNumberRow("Server Port", "serverPort", profilePort(profile), 1024, 65535, "TCP port clients connect to. Default Minecraft Java port is 25565."));
+            settings.addView(configTextRow("Gamemode", "gamemode", profileProperty(profile, "gamemode", "survival"), "Default mode: survival, creative, adventure, or spectator."));
+            settings.addView(configTextRow("Difficulty", "difficulty", profileProperty(profile, "difficulty", "normal"), "World difficulty: peaceful, easy, normal, or hard."));
+            settings.addView(configToggleRow("PVP", "pvp", boolProperty(profile, "pvp", true), "Allow players to damage other players."));
+            settings.addView(configToggleRow("Online Mode", "onlineMode", boolProperty(profile, "online-mode", true), "Require Mojang/Microsoft account authentication."));
+            settings.addView(configToggleRow("Allow Flight", "allowFlight", boolProperty(profile, "allow-flight", false), "Allow flying clients without server kicks."));
+            settings.addView(configToggleRow("Command Blocks", "enableCommandBlock", boolProperty(profile, "enable-command-block", false), "Enable command block execution."));
+            settings.addView(configNumberRow("Spawn Protection", "spawnProtection", intProperty(profile, "spawn-protection", 0), 0, 64, "Protected spawn radius in blocks."));
+            settings.addView(configToggleRow("Whitelist", "whiteList", boolProperty(profile, "white-list", false), "Only allow players on the whitelist."));
+        }
+        Button icon = secondaryButton("Upload Server Icon");
+        icon.setOnClickListener(v -> pickServerIcon(server == null ? "" : server.optString("id", "")));
+        settings.addView(icon, fullWidthButtonParams());
+        if (editable) {
+            Button resourcePack = secondaryButton("Upload Resource Pack");
+            resourcePack.setOnClickListener(v -> pickResourcePackZip());
+            settings.addView(resourcePack, fullWidthButtonParams());
+        }
+        if (editable) {
+            Button files = secondaryButton("File Browser");
+            files.setOnClickListener(v -> {
+                fileBrowserPath = "";
+                setPage("server-files");
+            });
+            settings.addView(files, fullWidthButtonParams());
+        }
+    }
+
+    private View configNumberRow(String title, String key, int value, int min, int max, String help) {
+        EditText input = input(String.valueOf(value));
+        return configInputRow(title, help, input, button -> {
+            int next = clamp(numberOr(input, value), min, max);
+            actionButton(button, "/api/config", "{\"" + key + "\":" + next + "}", "Saving " + title + "...");
+        });
+    }
+
+    private View configTextRow(String title, String key, String value, String help) {
+        EditText input = input(value);
+        return configInputRow(title, help, input, button ->
+            actionButton(button, "/api/config", "{\"" + key + "\":\"" + escapeJson(input.getText().toString().trim()) + "\"}", "Saving " + title + "..."));
+    }
+
+    private View configInputRow(String title, String help, EditText input, Consumer<Button> saveAction) {
+        LinearLayout row = column();
+        row.setPadding(0, dp(10), 0, dp(10));
+        LinearLayout header = row();
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(header, matchWrap());
+        header.addView(text(title, 15, TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button info = secondaryButton("?");
+        info.setOnClickListener(v -> showInfo(title, help));
+        header.addView(info, fixedButtonParams(44));
+        LinearLayout controls = row();
+        controls.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(controls, matchWrapMargin(0, dp(6), 0, 0));
+        controls.addView(input, new LinearLayout.LayoutParams(0, dp(46), 1));
+        Button save = primaryButton("Save");
+        save.setOnClickListener(v -> saveAction.accept(save));
+        controls.addView(save, fixedButtonParams(68));
+        return row;
+    }
+
+    private View configToggleRow(String title, String key, boolean value, String help) {
+        LinearLayout row = row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(10), 0, dp(10));
+        LinearLayout copy = column();
+        row.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        copy.addView(text(title, 15, TEXT, true));
+        copy.addView(text(help, 12, MUTED, false));
+        Button info = secondaryButton("?");
+        info.setOnClickListener(v -> showInfo(title, help));
+        row.addView(info, fixedButtonParams(44));
+        CheckBox toggle = new CheckBox(this);
+        toggle.setChecked(value);
+        toggle.setButtonTintList(ColorStateList.valueOf(ACCENT));
+        toggle.setOnCheckedChangeListener((button, checked) ->
+            postJson("/api/config", "{\"" + key + "\":" + checked + "}", "Saving " + title + "...", () -> setNotice(title + " saved.", false)));
+        row.addView(toggle);
+        return row;
+    }
+
+    private void showInfo(String title, String message) {
+        new AlertDialog.Builder(this).setTitle(title).setMessage(message).setPositiveButton("OK", null).show();
+    }
+
+    private String profileProperty(@Nullable JSONObject profile, String key, String fallback) {
+        JSONObject props = profile == null ? null : profile.optJSONObject("properties");
+        return props == null ? fallback : props.optString(key, fallback);
+    }
+
+    private boolean boolProperty(@Nullable JSONObject profile, String key, boolean fallback) {
+        String value = profileProperty(profile, key, fallback ? "true" : "false");
+        return "true".equalsIgnoreCase(value);
+    }
+
+    private int intProperty(@Nullable JSONObject profile, String key, int fallback) {
+        try {
+            return Integer.parseInt(profileProperty(profile, key, String.valueOf(fallback)));
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private int profilePort(@Nullable JSONObject profile) {
+        try {
+            JSONObject ports = profile == null ? null : profile.optJSONObject("ports");
+            return ports == null ? 25565 : ports.optInt("javaTcp", 25565);
+        } catch (Exception e) {
+            return 25565;
+        }
+    }
+
     private View serverRow(JSONObject server) {
         LinearLayout row = glassCard();
         row.setPadding(dp(14), dp(12), dp(14), dp(12));
@@ -826,7 +1821,7 @@ public class MineMuxActivity extends Activity {
         row.addView(text(server.optBoolean("installed") ? server.optString("joinAddress", "") : "Needs setup", 12, MUTED, false));
         if (!active) {
             Button use = secondaryButton("Use This Server");
-            use.setOnClickListener(v -> actionButton(use, "/api/servers/switch", "{\"serverId\":\"" + escapeJson(id) + "\"}", "Switching server..."));
+            use.setOnClickListener(v -> switchActiveServer(use, id));
             row.addView(use, fullWidthButtonParams());
         }
         Button details = secondaryButton("Details");
@@ -966,13 +1961,270 @@ public class MineMuxActivity extends Activity {
         upload.setOnClickListener(v -> pickBackupZip());
         actions.addView(upload, weightedButtonParams());
 
+        addBackupPolicyCard();
+
         LinearLayout list = column();
         content.addView(list, matchWrap());
         loadBackups(list);
     }
 
+    private void addBackupPolicyCard() {
+        content.addView(sectionTitle("Auto Backups"));
+        LinearLayout card = glassCard();
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        content.addView(card, matchWrapMargin(0, 0, 0, dp(12)));
+
+        CheckBox enabled = settingCheckBox(
+            "Auto backups",
+            "Create scheduled backups for the active server.",
+            backupPolicyAutoEnabled());
+        card.addView(enabled, matchWrapMargin(0, 0, 0, dp(8)));
+
+        Spinner interval = backupIntervalSpinner(backupPolicyIntervalMinutes());
+        addField(card, "Interval", interval);
+
+        EditText keep = input(String.valueOf(backupPolicyKeepAutoBackups()));
+        addField(card, "Keep count", keep);
+
+        TextView hint = text("Locked backups are kept until you delete them manually.", 12, MUTED, false);
+        hint.setPadding(0, dp(8), 0, dp(10));
+        card.addView(hint);
+
+        Button save = primaryButton("Save Backup Settings");
+        save.setOnClickListener(v -> saveBackupPolicy(save, enabled, interval, keep));
+        card.addView(save, fullWidthButtonParams());
+    }
+
+    private Spinner backupIntervalSpinner(int currentMinutes) {
+        int[] values = backupIntervalValues(currentMinutes);
+        String[] labels = new String[values.length];
+        int selected = 0;
+        for (int i = 0; i < values.length; i++) {
+            labels[i] = backupIntervalLabel(values[i]);
+            if (values[i] == currentMinutes) selected = i;
+        }
+        Spinner spinner = spinner(labels);
+        spinner.setTag(values);
+        spinner.setSelection(selected);
+        return spinner;
+    }
+
+    private int[] backupIntervalValues(int currentMinutes) {
+        for (int preset : BACKUP_INTERVAL_PRESET_MINUTES) {
+            if (preset == currentMinutes) return BACKUP_INTERVAL_PRESET_MINUTES;
+        }
+        int[] values = new int[BACKUP_INTERVAL_PRESET_MINUTES.length + 1];
+        values[0] = Math.max(1, currentMinutes);
+        for (int i = 0; i < BACKUP_INTERVAL_PRESET_MINUTES.length; i++) {
+            values[i + 1] = BACKUP_INTERVAL_PRESET_MINUTES[i];
+        }
+        return values;
+    }
+
+    private String backupIntervalLabel(int minutes) {
+        if (minutes == 30) return "Every 30 minutes";
+        if (minutes == 60) return "Every hour";
+        if (minutes % 1440 == 0) {
+            int days = minutes / 1440;
+            return days == 1 ? "Daily" : "Every " + days + " days";
+        }
+        if (minutes % 60 == 0) {
+            int hours = minutes / 60;
+            return "Every " + hours + " hours";
+        }
+        return "Every " + minutes + " minutes";
+    }
+
+    private void saveBackupPolicy(Button button, CheckBox enabled, Spinner interval, EditText keep) {
+        int keepCount = clamp(numberOr(keep, backupPolicyKeepAutoBackups()), 1, 100);
+        keep.setText(String.valueOf(keepCount));
+        int intervalMinutes = selectedBackupIntervalMinutes(interval);
+        String body = "{\"autoBackupEnabled\":" + enabled.isChecked()
+            + ",\"autoBackupIntervalMinutes\":" + intervalMinutes
+            + ",\"autoBackupKeep\":" + keepCount + "}";
+        actionButton(button, "/api/config", body, "Saving backup settings...");
+    }
+
+    private int selectedBackupIntervalMinutes(Spinner interval) {
+        Object tag = interval.getTag();
+        if (tag instanceof int[]) {
+            int[] values = (int[]) tag;
+            int position = clamp(interval.getSelectedItemPosition(), 0, values.length - 1);
+            return values[position];
+        }
+        return backupPolicyIntervalMinutes();
+    }
+
+    private JSONObject backupPolicy() {
+        try {
+            JSONObject profile = latestStatus == null ? null : latestStatus.optJSONObject("profile");
+            JSONObject backups = profile == null ? null : profile.optJSONObject("backups");
+            return backups == null ? new JSONObject() : backups;
+        } catch (Exception e) {
+            return new JSONObject();
+        }
+    }
+
+    private boolean backupPolicyAutoEnabled() {
+        return backupPolicy().optBoolean("autoEnabled", false);
+    }
+
+    private int backupPolicyIntervalMinutes() {
+        return Math.max(1, backupPolicy().optInt("intervalMinutes", 360));
+    }
+
+    private int backupPolicyKeepAutoBackups() {
+        return clamp(backupPolicy().optInt("keepAutoBackups", 5), 1, 100);
+    }
+
+    private void buildServerFilesPage() {
+        LinearLayout panel = glassCard();
+        panel.setPadding(dp(16), dp(16), dp(16), dp(16));
+        content.addView(panel, matchWrapMargin(0, dp(8), 0, dp(12)));
+        LinearLayout header = row();
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        panel.addView(header, matchWrap());
+        Button up = secondaryButton("Up");
+        up.setOnClickListener(v -> {
+            if (!fileBrowserPath.isEmpty()) {
+                int slash = fileBrowserPath.lastIndexOf('/');
+                fileBrowserPath = slash <= 0 ? "" : fileBrowserPath.substring(0, slash);
+                setPage("server-files");
+            }
+        });
+        header.addView(up, fixedButtonParams(58));
+        TextView path = text(fileBrowserPath.isEmpty() ? "/" : "/" + fileBrowserPath, 16, TEXT, true);
+        header.addView(path, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button upload = primaryButton("Upload");
+        upload.setOnClickListener(v -> pickServerUploadFile());
+        header.addView(upload, fixedButtonParams(86));
+
+        LinearLayout list = column();
+        content.addView(list, matchWrap());
+        loadServerFiles(list);
+    }
+
+    private void loadServerFiles(LinearLayout list) {
+        list.removeAllViews();
+        getJson("/api/server/files?path=" + urlEncode(fileBrowserPath), body -> {
+            try {
+                JSONArray files = new JSONObject(body).optJSONArray("files");
+                if (files == null || files.length() == 0) {
+                    list.addView(emptyState("This folder is empty."));
+                    return;
+                }
+                for (int i = 0; i < files.length(); i++) {
+                    JSONObject file = files.getJSONObject(i);
+                    list.addView(serverFileRow(file));
+                }
+            } catch (Exception e) {
+                list.addView(emptyState(e.getMessage()));
+            }
+        }, error -> list.addView(emptyState(error)));
+    }
+
+    private View serverFileRow(JSONObject file) {
+        LinearLayout row = glassCard();
+        row.setPadding(dp(12), dp(12), dp(12), dp(12));
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setLayoutParams(matchWrapMargin(0, 0, 0, dp(8)));
+        boolean directory = file.optBoolean("directory");
+        String path = file.optString("path", "");
+        row.addView(text((directory ? "[DIR] " : "") + file.optString("name", path), 15, TEXT, true));
+        row.addView(text(directory ? "Folder" : bytes(file.optLong("sizeBytes", 0)), 12, MUTED, false));
+        LinearLayout actions = row();
+        row.addView(actions, matchWrapMargin(0, dp(8), 0, 0));
+        if (directory) {
+            Button open = primaryButton("Open");
+            open.setOnClickListener(v -> {
+                fileBrowserPath = path;
+                setPage("server-files");
+            });
+            actions.addView(open, weightedButtonParams());
+            Button download = secondaryButton("Download");
+            download.setOnClickListener(v -> downloadServerFile(path, true));
+            actions.addView(download, weightedButtonParams());
+        } else {
+            Button edit = secondaryButton("Edit");
+            edit.setOnClickListener(v -> editServerFile(path));
+            actions.addView(edit, weightedButtonParams());
+            Button download = secondaryButton("Download");
+            download.setOnClickListener(v -> downloadServerFile(path, false));
+            actions.addView(download, weightedButtonParams());
+        }
+        Button delete = dangerButton("Delete");
+        delete.setOnClickListener(v -> confirmDeleteServerFile(path));
+        actions.addView(delete, weightedButtonParams());
+        return row;
+    }
+
+    private void editServerFile(String path) {
+        getJson("/api/server/file?raw=1&path=" + urlEncode(path), body -> {
+            try {
+                JSONObject json = new JSONObject(body);
+                EditText edit = input(json.optString("content", ""));
+                edit.setSingleLine(false);
+                edit.setMinLines(10);
+                edit.setGravity(Gravity.TOP);
+                new AlertDialog.Builder(this)
+                    .setTitle(path)
+                    .setView(edit)
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Save", (dialog, which) ->
+                        putJson("/api/server/file?path=" + urlEncode(path), "{\"content\":\"" + escapeJson(edit.getText().toString()) + "\"}", "Saving file...", () -> setPage("server-files")))
+                    .show();
+            } catch (Exception e) {
+                setNotice(e.getMessage(), true);
+            }
+        }, error -> setNotice(error, true));
+    }
+
+    private void confirmDeleteServerFile(String path) {
+        new AlertDialog.Builder(this)
+            .setTitle("Delete file?")
+            .setMessage(path)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete", (dialog, which) -> deleteJson("/api/server/file?path=" + urlEncode(path), "Deleting file...", () -> setPage("server-files")))
+            .show();
+    }
+
+    private void pickServerUploadFile() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        startActivityForResult(intent, REQUEST_PICK_SERVER_UPLOAD);
+    }
+
+    private void pickSetupJar() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/java-archive");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/java-archive", "application/x-java-archive", "application/octet-stream", "*/*"});
+        startActivityForResult(intent, REQUEST_PICK_SETUP_JAR);
+    }
+
+    private void pickServerIcon(String serverId) {
+        pendingIconServerId = serverId == null ? "" : serverId;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("image/png");
+        startActivityForResult(intent, REQUEST_PICK_SERVER_ICON);
+    }
+
+    private void pickResourcePackZip() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/zip");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip", "application/x-zip-compressed", "application/octet-stream"});
+        startActivityForResult(intent, REQUEST_PICK_RESOURCE_PACK);
+    }
+
     private void buildSettingsPage() {
         pageTitle.setText("Settings");
+        if (useRedesignedSettings()) {
+            buildSettingsPageV2();
+            return;
+        }
         LinearLayout profile = glassCard();
         profile.setPadding(dp(24), dp(22), dp(24), dp(22));
         content.addView(profile, matchWrapMargin(0, dp(18), 0, dp(18)));
@@ -1052,6 +2304,191 @@ public class MineMuxActivity extends Activity {
         footer.setGravity(Gravity.CENTER);
         footer.setPadding(0, dp(4), 0, dp(18));
         content.addView(footer, matchWrap());
+    }
+
+    private boolean useRedesignedSettings() {
+        return true;
+    }
+
+    private void buildSettingsPageV2() {
+        TextView preferencesTitle = sectionTitle("Preferences");
+        content.addView(preferencesTitle);
+        LinearLayout preferencesCard = sectionCard("", "", null);
+        content.addView(preferencesCard, matchWrapMargin(0, 0, 0, dp(16)));
+        boolean notifications = preferences == null || preferences.getBoolean(PREF_NOTIFICATIONS, true);
+        preferencesCard.addView(toggleSettingRow("!", "Notifications", "Show setup, backup, and server state alerts", WARNING, notifications, checked -> {
+            if (preferences != null) preferences.edit().putBoolean(PREF_NOTIFICATIONS, checked).apply();
+            MineMuxRuntime.refreshServiceNotification(this);
+        }));
+        preferencesCard.addView(themeSettingRowV2());
+        preferencesCard.addView(toggleSettingRow(">", "Start server on phone boot", "MineMux runs headless after boot and starts the active server", GREEN, profileFeatureBool("autoStart", false),
+            checked -> postJson("/api/config", "{\"autoStart\":" + checked + "}", "Saving boot setting...", () -> setNotice("Boot setting saved.", false))));
+        preferencesCard.addView(toggleSettingRow("R", "Auto-restart on crash", "Restart the active server after a crash", ACCENT, profileFeatureBool("restartOnCrash", true),
+            checked -> postJson("/api/config", "{\"restartOnCrash\":" + checked + "}", "Saving restart setting...", () -> setNotice("Restart setting saved.", false))));
+        preferencesCard.addView(settingRowIcon("B", "Backups", "Create, upload, restore, and download backups", GREEN, () -> setPage("backups")));
+
+        addServerDefaultsSection();
+
+        content.addView(sectionTitle("Advanced Tools"));
+        LinearLayout tools = sectionCard("", "", null);
+        content.addView(tools, matchWrapMargin(0, 0, 0, dp(16)));
+        tools.addView(settingRowIcon("T", "Terminal", "Open shell recovery", GREEN, () -> startActivity(new Intent(this, TermuxActivity.class))));
+        tools.addView(settingRowIcon("W", "Web UI", "Open advanced browser console", MUTED, () -> startActivity(new Intent(this, MineMuxWebActivity.class))));
+
+        TextView footer = text("App Version " + appVersionText(), 11, TERTIARY, false);
+        footer.setGravity(Gravity.CENTER);
+        footer.setPadding(0, dp(4), 0, dp(18));
+        content.addView(footer, matchWrap());
+    }
+
+    private TextView sectionTitle(String title) {
+        TextView view = text(title, 16, MUTED, true);
+        view.setPadding(dp(2), 0, 0, dp(8));
+        return view;
+    }
+
+    private void addSettingsProfileCard() {
+        LinearLayout profile = glassCard();
+        profile.setPadding(dp(16), dp(16), dp(16), dp(16));
+        content.addView(profile, matchWrapMargin(0, dp(12), 0, dp(16)));
+
+        LinearLayout top = row();
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        profile.addView(top, matchWrap());
+        TextView avatar = text("C", 34, 0xff050505, true);
+        avatar.setGravity(Gravity.CENTER);
+        avatar.setIncludeFontPadding(false);
+        avatar.setBackground(makeBg(GREEN, GREEN, 18));
+        top.addView(avatar, new LinearLayout.LayoutParams(dp(76), dp(76)));
+        LinearLayout identity = column();
+        LinearLayout.LayoutParams identityParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        identityParams.setMargins(dp(14), 0, 0, 0);
+        top.addView(identity, identityParams);
+        identity.addView(text("Mc Phone", 26, TEXT, true));
+        identity.addView(text("mcphone@example.com", 14, MUTED, false));
+        identity.addView(statusPill("Free", MUTED), matchWrapMargin(0, dp(8), 0, 0));
+
+        LinearLayout statsA = row();
+        profile.addView(statsA, matchWrapMargin(0, dp(14), 0, dp(4)));
+        TextView servers = profileStatValue("0", "Servers");
+        TextView backups = profileStatValue("0", "Backups");
+        statsA.addView(profileStatCard(servers), weightedMetricParams());
+        statsA.addView(profileStatCard(backups), weightedMetricParams());
+        LinearLayout statsB = row();
+        profile.addView(statsB, matchWrap());
+        TextView backupSize = profileStatValue("0 KB", "Cloud Backups");
+        TextView plan = profileStatValue("Free", "Subscription");
+        statsB.addView(profileStatCard(backupSize), weightedMetricParams());
+        statsB.addView(profileStatCard(plan), weightedMetricParams());
+        loadSettingsStats(servers, backups, backupSize);
+    }
+
+    private TextView profileStatValue(String value, String label) {
+        TextView view = text(value + "\n" + label, 15, TEXT, true);
+        view.setGravity(Gravity.CENTER);
+        return view;
+    }
+
+    private LinearLayout profileStatCard(TextView value) {
+        LinearLayout card = card();
+        card.setPadding(dp(8), dp(10), dp(8), dp(10));
+        card.addView(value);
+        return card;
+    }
+
+    private void loadSettingsStats(TextView servers, TextView backups, TextView backupSize) {
+        getJson("/api/servers", body -> {
+            try {
+                JSONArray list = new JSONObject(body).optJSONArray("servers");
+                int count = list == null ? 0 : list.length();
+                servers.setText(count + "\nServers");
+            } catch (Exception ignored) {}
+        }, error -> {});
+        getJson("/api/backups", body -> {
+            try {
+                JSONArray list = new JSONObject(body).optJSONArray("backups");
+                int count = list == null ? 0 : list.length();
+                long total = 0;
+                if (list != null) {
+                    for (int i = 0; i < list.length(); i++) total += list.getJSONObject(i).optLong("sizeBytes", 0);
+                }
+                backups.setText(count + "\nBackups");
+                backupSize.setText(bytes(total) + "\nCloud Backups");
+            } catch (Exception ignored) {}
+        }, error -> {});
+    }
+
+    private void addServerDefaultsSection() {
+        content.addView(sectionTitle("Server Defaults"));
+        LinearLayout defaults = sectionCard("", "", null);
+        content.addView(defaults, matchWrapMargin(0, 0, 0, dp(16)));
+        int memoryDefault = preferences == null ? profileInt("memoryMb", wizardMemory) : preferences.getInt(PREF_DEFAULT_MEMORY_MB, profileInt("memoryMb", wizardMemory));
+        int playersDefault = preferences == null ? profileInt("maxPlayers", wizardPlayers) : preferences.getInt(PREF_DEFAULT_MAX_PLAYERS, profileInt("maxPlayers", wizardPlayers));
+        int viewDefault = preferences == null ? profileInt("viewDistance", 6) : preferences.getInt(PREF_DEFAULT_VIEW_DISTANCE, profileInt("viewDistance", 6));
+        int simDefault = preferences == null ? profileInt("simulationDistance", 4) : preferences.getInt(PREF_DEFAULT_SIM_DISTANCE, profileInt("simulationDistance", 4));
+        EditText memoryInput = input(String.valueOf(memoryDefault));
+        addField(defaults, "Memory MB", memoryInput);
+        EditText playersInput = input(String.valueOf(playersDefault));
+        addField(defaults, "Max players", playersInput);
+        EditText viewInput = input(String.valueOf(viewDefault));
+        addField(defaults, "Render distance", viewInput);
+        EditText simInput = input(String.valueOf(simDefault));
+        addField(defaults, "Simulation distance", simInput);
+
+        LinearLayout actions = row();
+        defaults.addView(actions, matchWrapMargin(0, dp(10), 0, 0));
+        Button tune = secondaryButton("Auto Set");
+        tune.setOnClickListener(v -> autoTuneDefaults(memoryInput, playersInput, viewInput, simInput));
+        actions.addView(tune, weightedButtonParams());
+        Button save = primaryButton("Save");
+        save.setOnClickListener(v -> saveDefaultServerSettings(save, memoryInput, playersInput, viewInput, simInput));
+        actions.addView(save, weightedButtonParams());
+    }
+
+    private void autoTuneDefaults(EditText memoryInput, EditText playersInput, EditText viewInput, EditText simInput) {
+        long totalMemory = 0;
+        int cores = 0;
+        try {
+            JSONObject system = latestStatus == null ? null : latestStatus.optJSONObject("system");
+            if (system != null) {
+                totalMemory = system.getJSONObject("memory").optLong("totalBytes", 0);
+                cores = system.getJSONObject("cpu").optInt("cores", 0);
+            }
+        } catch (Exception ignored) {}
+        long gb = totalMemory / 1024L / 1024L / 1024L;
+        int memory = gb >= 7 ? 3072 : gb >= 5 ? 2048 : gb >= 3 ? 1536 : 1024;
+        int players = gb >= 7 && cores >= 6 ? 12 : gb >= 5 ? 8 : 4;
+        int view = gb >= 7 ? 8 : gb >= 5 ? 6 : 4;
+        int sim = gb >= 7 ? 6 : gb >= 5 ? 4 : 3;
+        memoryInput.setText(String.valueOf(memory));
+        playersInput.setText(String.valueOf(players));
+        viewInput.setText(String.valueOf(view));
+        simInput.setText(String.valueOf(sim));
+        setNotice("Defaults tuned for this phone.", false);
+    }
+
+    private void saveDefaultServerSettings(Button button, EditText memoryInput, EditText playersInput, EditText viewInput, EditText simInput) {
+        int memoryValue = clamp(numberOr(memoryInput, wizardMemory), 512, 8192);
+        int playersValue = clamp(numberOr(playersInput, wizardPlayers), 1, 50);
+        int viewValue = clamp(numberOr(viewInput, 6), 2, 32);
+        int simValue = clamp(numberOr(simInput, 4), 2, 32);
+        if (preferences != null) {
+            preferences.edit()
+                .putInt(PREF_DEFAULT_MEMORY_MB, memoryValue)
+                .putInt(PREF_DEFAULT_MAX_PLAYERS, playersValue)
+                .putInt(PREF_DEFAULT_VIEW_DISTANCE, viewValue)
+                .putInt(PREF_DEFAULT_SIM_DISTANCE, simValue)
+                .apply();
+        }
+        String body = "{\"memoryMb\":" + memoryValue
+            + ",\"maxPlayers\":" + playersValue
+            + ",\"viewDistance\":" + viewValue
+            + ",\"simulationDistance\":" + simValue + "}";
+        if (!activeServerInstalled()) {
+            setNotice("Default settings saved.", false);
+            return;
+        }
+        actionButton(button, "/api/config", body, "Saving server defaults...");
     }
 
     private void loadBackups(LinearLayout list) {
@@ -1138,7 +2575,17 @@ public class MineMuxActivity extends Activity {
                 if ("dashboard".equals(currentPage) || operationRunning) refreshLogs();
                 boolean installedNow = server.optBoolean("installed");
                 boolean runningNow = server.optBoolean("running");
-                updateServerWakeLock(runningNow);
+                boolean readyNow = server.optBoolean("ready", !runningNow);
+                boolean stoppingNow = server.optBoolean("stopping", false);
+                boolean startingNow = server.optBoolean("starting", false);
+                if (runningNow && readyNow) startingServer = false;
+                if (!runningNow || !stoppingNow) stoppingServer = false;
+                sampleDashboardHistory(server);
+                updateServerWakeLock(runningNow || startingNow || stoppingNow || startingServer || stoppingServer);
+                if (runningNow || startingNow || stoppingNow || startingServer || stoppingServer) {
+                    MineMuxRuntime.acquireServiceWakeLock(this);
+                }
+                updateDashboardLiveViews();
                 if ("dashboard".equals(currentPage)
                     && (lastDashboardInstalled == null || lastDashboardInstalled != installedNow || lastDashboardRunning == null || lastDashboardRunning != runningNow)) {
                     lastDashboardInstalled = installedNow;
@@ -1175,6 +2622,57 @@ public class MineMuxActivity extends Activity {
         }
     }
 
+    private void applyPaletteFromPreferences() {
+        themeMode = preferences == null ? "System" : preferences.getString(PREF_THEME_MODE, "System");
+        boolean dark = shouldUseDarkPalette(themeMode);
+        if (dark) {
+            BG = 0xff050505;
+            PANEL = 0xff111111;
+            PANEL_ALT = 0xff1a1a1a;
+            PANEL_SOFT = 0xff0d0d0d;
+            STROKE = 0xff303030;
+            TEXT = 0xfff4f4f4;
+            MUTED = 0xffa8a8a8;
+            TERTIARY = 0xff737373;
+            ACCENT = GREEN;
+            ACCENT_TEXT = 0xffffffff;
+            WARNING = 0xffd6d6d6;
+            ERROR = 0xfff4f4f4;
+            RED = 0xff202020;
+            PURPLE = 0xff8a8a8a;
+        } else {
+            BG = 0xfff6f6f6;
+            PANEL = 0xffffffff;
+            PANEL_ALT = 0xffeeeeee;
+            PANEL_SOFT = 0xfffbfbfb;
+            STROKE = 0xffd8d8d8;
+            TEXT = 0xff111111;
+            MUTED = 0xff626262;
+            TERTIARY = 0xff8a8a8a;
+            ACCENT = GREEN;
+            ACCENT_TEXT = 0xffffffff;
+            WARNING = 0xff4c4c4c;
+            ERROR = 0xff111111;
+            RED = 0xffe8e8e8;
+            PURPLE = 0xff707070;
+        }
+    }
+
+    private boolean shouldUseDarkPalette(String mode) {
+        if ("Dark".equalsIgnoreCase(mode)) return true;
+        if ("Light".equalsIgnoreCase(mode)) return false;
+        int current = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        return current == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private void rebuildWithTheme(String mode) {
+        if (preferences != null) preferences.edit().putString(PREF_THEME_MODE, mode).apply();
+        String page = currentPage;
+        applyPaletteFromPreferences();
+        setContentView(buildContent());
+        if (!"dashboard".equals(page)) setPage(page);
+    }
+
     private void updateServerWakeLock(boolean running) {
         if (running) acquireServerWakeLock();
         else releaseServerWakeLock();
@@ -1206,15 +2704,18 @@ public class MineMuxActivity extends Activity {
                 JSONArray lines = new JSONObject(body).optJSONArray("lines");
                 if (lines == null || lines.length() == 0) {
                     if (logs != null) logs.setText("No logs yet.");
+                    if (setupLogOutput != null) setupLogOutput.setText("Waiting for setup output...");
                     return;
                 }
                 StringBuilder out = new StringBuilder();
                 int start = Math.max(0, lines.length() - 12);
                 for (int i = start; i < lines.length(); i++) out.append(lines.getString(i)).append('\n');
                 if (logs != null) logs.setText(out.toString());
+                if (setupLogOutput != null) setupLogOutput.setText(out.toString());
                 updateOperationFromLog(lines);
             } catch (Exception e) {
                 if (logs != null) logs.setText(e.getMessage());
+                if (setupLogOutput != null) setupLogOutput.setText(e.getMessage());
             }
         }, error -> {});
     }
@@ -1235,7 +2736,12 @@ public class MineMuxActivity extends Activity {
             setNotice("Controller is still starting. Try again in a moment.", true);
             return;
         }
-        if (isCoolingDown(button)) return;
+        String actionKey = path + ":" + json;
+        if (operationRunning || isCoolingDown(button) || isActionCoolingDown(actionKey)) {
+            setNotice("Still working. Wait a moment.", false);
+            return;
+        }
+        actionCooldowns.put(actionKey, System.currentTimeMillis() + 1500);
         String original = beginButton(button, progress);
         beginOperation(progress.replace("...", ""), progress);
         postJson(path, json, progress, () -> {
@@ -1249,8 +2755,80 @@ public class MineMuxActivity extends Activity {
         buttonCooldowns.put(button, System.currentTimeMillis() + 1200);
         button.setEnabled(false);
         button.setText(busyText);
-        beginOperation("Working", busyText);
         return original;
+    }
+
+    private void startServerFromUi(Button button) {
+        long now = System.currentTimeMillis();
+        if (lastStopRequestedAtMs > 0 && now - lastStopRequestedAtMs < 30000) {
+            setNotice("Server just stopped. Wait " + shortDuration((30000 - (now - lastStopRequestedAtMs)) / 1000) + " before starting.", true);
+            return;
+        }
+        startingServer = true;
+        stoppingServer = false;
+        lastStartRequestedAtMs = now;
+        acquireServerWakeLock();
+        MineMuxRuntime.acquireServiceWakeLock(this);
+        actionButton(button, "/api/server/start", "{}", "Starting server...");
+        updateDashboardLiveViews();
+    }
+
+    private void switchActiveServer(Button button, String serverId) {
+        actionButton(button, "/api/servers/switch", "{\"serverId\":\"" + escapeJson(serverId) + "\"}", "Switching server...");
+        lastStartRequestedAtMs = 0;
+        lastStopRequestedAtMs = 0;
+        startingServer = false;
+        stoppingServer = false;
+        actionCooldowns.clear();
+        buttonCooldowns.clear();
+        mainHandler.postDelayed(() -> {
+            refreshStatus();
+            if ("server-detail".equals(currentPage)) setPage("servers");
+        }, 800);
+    }
+
+    private void confirmStop(Button button) {
+        if (operationRunning) {
+            setNotice("Still working. Wait a moment.", false);
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (lastStartRequestedAtMs > 0 && now - lastStartRequestedAtMs < 30000 && !serverReady()) {
+            setNotice("Server is still starting. Wait " + shortDuration((30000 - (now - lastStartRequestedAtMs)) / 1000) + " before stopping.", true);
+            return;
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Stop server?")
+            .setMessage("This disconnects players and stops the running world.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Stop", (dialog, which) -> {
+                stoppingServer = true;
+                startingServer = false;
+                lastStopRequestedAtMs = System.currentTimeMillis();
+                actionButton(button, "/api/server/stop", "{}", "Stopping server...");
+                releaseServerWakeLock();
+                updateDashboardLiveViews();
+            })
+            .show();
+    }
+
+    private void confirmRestart(Button button) {
+        if (operationRunning) {
+            setNotice("Still working. Wait a moment.", false);
+            return;
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Restart server?")
+            .setMessage("Players may be disconnected while the server restarts.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Restart", (dialog, which) -> {
+                startingServer = true;
+                stoppingServer = false;
+                MineMuxRuntime.acquireServiceWakeLock(this);
+                actionButton(button, "/api/server/restart", "{}", "Restarting server...");
+                updateDashboardLiveViews();
+            })
+            .show();
     }
 
     private void finishButton(Button button, String original) {
@@ -1283,10 +2861,10 @@ public class MineMuxActivity extends Activity {
 
     private void updateSetupProgress() {
         if (!setupProgressRunning) return;
-        long elapsed = Math.max(0, System.currentTimeMillis() - setupStartedAtMs);
-        int percent = Math.min(95, (int) (elapsed * 100 / setupEstimateMs));
-        String detail = "Setting up server... " + percent + "%";
+        int percent = setupProgressPercent();
+        String detail = setupProgressText();
         if (operationDetail != null) operationDetail.setText(detail);
+        if (setupProgressDetail != null) setupProgressDetail.setText(detail);
         operationMessage = detail;
         if (globalProgress != null) {
             globalProgress.setIndeterminate(false);
@@ -1294,7 +2872,25 @@ public class MineMuxActivity extends Activity {
             globalProgress.setProgress(percent);
             globalProgress.setVisibility(View.VISIBLE);
         }
+        if (setupProgressBar != null) {
+            setupProgressBar.setIndeterminate(false);
+            setupProgressBar.setMax(100);
+            setupProgressBar.setProgress(percent);
+        }
         mainHandler.postDelayed(this::updateSetupProgress, 1500);
+    }
+
+    private int setupProgressPercent() {
+        if (!setupProgressRunning || setupStartedAtMs <= 0) return 0;
+        long elapsed = Math.max(0, System.currentTimeMillis() - setupStartedAtMs);
+        return Math.min(95, (int) (elapsed * 100 / setupEstimateMs));
+    }
+
+    private String setupProgressText() {
+        if (!setupProgressRunning || setupStartedAtMs <= 0) return "Waiting to start...";
+        long elapsed = Math.max(0, System.currentTimeMillis() - setupStartedAtMs);
+        long remaining = Math.max(0, setupEstimateMs - elapsed);
+        return "Setting up server... " + setupProgressPercent() + "% - ETA " + shortDuration(remaining / 1000);
     }
 
     private void endOperation() {
@@ -1313,8 +2909,13 @@ public class MineMuxActivity extends Activity {
         return true;
     }
 
+    private boolean isActionCoolingDown(String key) {
+        Long until = actionCooldowns.get(key);
+        return until != null && System.currentTimeMillis() < until;
+    }
+
     private void postJson(String path, String json, String progress, Runnable done) {
-        setNotice(progress, false);
+        if (!operationRunning) setNotice(progress, false);
         new Thread(() -> {
             try {
                 request(path, "POST", json);
@@ -1348,6 +2949,21 @@ public class MineMuxActivity extends Activity {
                     setNotice(e.getMessage(), true);
                     done.run();
                 });
+            }
+        }).start();
+    }
+
+    private void putJson(String path, String json, String progress, Runnable done) {
+        setNotice(progress, false);
+        new Thread(() -> {
+            try {
+                request(path, "PUT", json);
+                mainHandler.post(() -> {
+                    setNotice("Saved", false);
+                    done.run();
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> setNotice(e.getMessage(), true));
             }
         }).start();
     }
@@ -1387,19 +3003,178 @@ public class MineMuxActivity extends Activity {
                 HttpURLConnection connection = (HttpURLConnection) url.openConnection();
                 connection.setConnectTimeout(5000);
                 connection.setReadTimeout(600000);
-                File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-                if (!downloads.exists() && !downloads.mkdirs()) throw new Exception("Could not create Downloads folder");
-                File outFile = new File(downloads, id + ".zip");
-                try (InputStream in = connection.getInputStream(); FileOutputStream out = new FileOutputStream(outFile)) {
+                Uri target = createDownloadUri(id + ".zip", "application/zip");
+                if (target == null) throw new Exception("Could not create Downloads file");
+                try (InputStream in = connection.getInputStream(); OutputStream out = getContentResolver().openOutputStream(target)) {
+                    if (out == null) throw new Exception("Could not open Downloads file");
                     byte[] buffer = new byte[8192];
                     int read;
                     while ((read = in.read(buffer)) >= 0) out.write(buffer, 0, read);
                 }
-                mainHandler.post(() -> setNotice("Downloaded to Downloads/" + outFile.getName(), false));
+                mainHandler.post(() -> setNotice("Downloaded to Downloads/" + id + ".zip", false));
             } catch (Exception e) {
                 mainHandler.post(() -> setNotice(e.getMessage(), true));
             }
         }).start();
+    }
+
+    private void downloadServerFile(String path, boolean directory) {
+        setNotice("Downloading file...", false);
+        new Thread(() -> {
+            try {
+                URL url = new URL(MineMuxRuntime.DASHBOARD_URL + "/api/server/file?path=" + urlEncode(path));
+                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(600000);
+                String name = path.contains("/") ? path.substring(path.lastIndexOf('/') + 1) : path;
+                if (name == null || name.trim().isEmpty()) name = "server-files";
+                if (directory && !name.endsWith(".zip")) name += ".zip";
+                final String downloadName = name;
+                Uri target = createDownloadUri(downloadName, directory ? "application/zip" : "application/octet-stream");
+                if (target == null) throw new Exception("Could not create Downloads file");
+                try (InputStream in = connection.getInputStream(); OutputStream out = getContentResolver().openOutputStream(target)) {
+                    if (out == null) throw new Exception("Could not open Downloads file");
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = in.read(buffer)) >= 0) out.write(buffer, 0, read);
+                }
+                mainHandler.post(() -> setNotice("Downloaded to Downloads/" + downloadName, false));
+            } catch (Exception e) {
+                mainHandler.post(() -> setNotice(e.getMessage(), true));
+            }
+        }).start();
+    }
+
+    private void uploadServerFile(Uri uri, String targetPath) {
+        setNotice("Uploading file...", false);
+        new Thread(() -> {
+            try {
+                String fileName = displayName(uri);
+                if (fileName == null || fileName.trim().isEmpty()) fileName = "upload.bin";
+                String boundary = "minemux-file-" + System.currentTimeMillis();
+                HttpURLConnection connection = (HttpURLConnection) new URL(MineMuxRuntime.DASHBOARD_URL + "/api/server/file/upload?path=" + urlEncode(targetPath)).openConnection();
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(600000);
+                connection.setRequestMethod("POST");
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+                try (OutputStream out = connection.getOutputStream(); InputStream in = getContentResolver().openInputStream(uri)) {
+                    if (in == null) throw new Exception("Could not open selected file");
+                    out.write(("--" + boundary + "\r\n").getBytes(StandardCharsets.UTF_8));
+                    out.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + fileName.replace("\"", "") + "\"\r\n").getBytes(StandardCharsets.UTF_8));
+                    out.write("Content-Type: application/octet-stream\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = in.read(buffer)) >= 0) out.write(buffer, 0, read);
+                    out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+                }
+                int code = connection.getResponseCode();
+                if (code < 200 || code >= 300) throw new Exception(readError(connection));
+                mainHandler.post(() -> {
+                    setNotice("File uploaded.", false);
+                    setPage("server-files");
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> setNotice(e.getMessage(), true));
+            }
+        }).start();
+    }
+
+    private void uploadSetupJar(Uri uri) {
+        setNotice("Uploading setup JAR...", false);
+        new Thread(() -> {
+            try {
+                String response = multipartUpload(uri, "/api/server/setup/jar", "file");
+                JSONObject json = new JSONObject(response);
+                wizardCustomJarId = json.optString("customJarId", "");
+                wizardCustomJarName = json.optString("fileName", displayName(uri));
+                wizardJarMode = "custom";
+                mainHandler.post(() -> {
+                    setNotice("Custom server.jar uploaded.", false);
+                    setPage("setup");
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> setNotice(e.getMessage(), true));
+            }
+        }).start();
+    }
+
+    private void uploadServerIcon(Uri uri, String serverId) {
+        setNotice("Uploading server icon...", false);
+        new Thread(() -> {
+            try {
+                String id = serverId == null || serverId.trim().isEmpty() ? "" : "?serverId=" + urlEncode(serverId);
+                multipartUpload(uri, "/api/server/icon" + id, "file");
+                mainHandler.post(() -> {
+                    setNotice("Server icon uploaded.", false);
+                    refreshStatus();
+                    if ("server-detail".equals(currentPage)) setPage("server-detail");
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> setNotice(e.getMessage(), true));
+            }
+        }).start();
+    }
+
+    private void uploadResourcePack(Uri uri) {
+        setNotice("Uploading resource pack...", false);
+        new Thread(() -> {
+            try {
+                multipartUpload(uri, "/api/server/resource-pack", "file");
+                mainHandler.post(() -> {
+                    setNotice("Resource pack uploaded and linked.", false);
+                    refreshStatus();
+                    if ("server-detail".equals(currentPage)) setPage("server-detail");
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> setNotice(e.getMessage(), true));
+            }
+        }).start();
+    }
+
+    private String multipartUpload(Uri uri, String path, String fieldName) throws Exception {
+        String fileName = displayName(uri);
+        if (fileName == null || fileName.trim().isEmpty()) fileName = "upload.bin";
+        String boundary = "minemux-upload-" + System.currentTimeMillis();
+        HttpURLConnection connection = (HttpURLConnection) new URL(MineMuxRuntime.DASHBOARD_URL + path).openConnection();
+        connection.setConnectTimeout(5000);
+        connection.setReadTimeout(600000);
+        connection.setRequestMethod("POST");
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        try (OutputStream out = connection.getOutputStream(); InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) throw new Exception("Could not open selected file");
+            out.write(("--" + boundary + "\r\n").getBytes(StandardCharsets.UTF_8));
+            out.write(("Content-Disposition: form-data; name=\"" + fieldName + "\"; filename=\"" + fileName.replace("\"", "") + "\"\r\n").getBytes(StandardCharsets.UTF_8));
+            out.write("Content-Type: application/octet-stream\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) >= 0) out.write(buffer, 0, read);
+            out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+        }
+        int code = connection.getResponseCode();
+        if (code < 200 || code >= 300) throw new Exception(readError(connection));
+        try (InputStream in = connection.getInputStream(); BufferedReader reader = new BufferedReader(new InputStreamReader(in))) {
+            StringBuilder body = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) body.append(line);
+            return body.toString();
+        }
+    }
+
+    private Uri createDownloadUri(String fileName, String mimeType) {
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
+        values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            return getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        }
+        File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        if (!downloads.exists()) //noinspection ResultOfMethodCallIgnored
+            downloads.mkdirs();
+        File outFile = new File(downloads, fileName);
+        return Uri.fromFile(outFile);
     }
 
     private void uploadBackupAndRestore(Uri uri) {
@@ -1609,6 +3384,44 @@ public class MineMuxActivity extends Activity {
         }
     }
 
+    private JSONObject playItStatus() {
+        try {
+            JSONObject server = latestStatus == null ? null : latestStatus.optJSONObject("server");
+            JSONObject playit = server == null ? null : server.optJSONObject("playit");
+            return playit == null ? new JSONObject() : playit;
+        } catch (Exception e) {
+            return new JSONObject();
+        }
+    }
+
+    private JSONObject playItStatus(JSONObject serverSummary) {
+        if (serverSummary == null) return new JSONObject();
+        JSONObject nestedServer = serverSummary.optJSONObject("server");
+        JSONObject playit = nestedServer == null ? serverSummary.optJSONObject("playit") : nestedServer.optJSONObject("playit");
+        return playit == null ? new JSONObject() : playit;
+    }
+
+    private boolean hasPlayItOutput(JSONObject playit) {
+        if (playit == null) return false;
+        return !playit.optString("claimUrl", "").isEmpty()
+            || !playit.optString("address", "").isEmpty()
+            || !playit.optString("error", "").isEmpty();
+    }
+
+    private void copyToClipboard(String label, String value) {
+        android.content.ClipboardManager clipboard = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard != null) clipboard.setPrimaryClip(android.content.ClipData.newPlainText(label, value));
+        setNotice("Copied.", false);
+    }
+
+    private void openUrl(String url) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Exception e) {
+            setNotice(e.getMessage(), true);
+        }
+    }
+
     private String versionText() {
         try {
             JSONObject profile = latestStatus.optJSONObject("profile");
@@ -1669,7 +3482,6 @@ public class MineMuxActivity extends Activity {
         try {
             JSONObject cpu = latestStatus.getJSONObject("system").getJSONObject("cpu");
             double percent = cpu.optDouble("percent", 0);
-            if (percent <= 0) return "Sampling";
             return new DecimalFormat("#.#").format(percent) + "%";
         } catch (Exception e) {
             return "-";
@@ -1678,6 +3490,15 @@ public class MineMuxActivity extends Activity {
 
     private String ramText() {
         return systemStorageText("memory");
+    }
+
+    private String ramPercentText() {
+        try {
+            JSONObject stats = latestStatus.getJSONObject("system").getJSONObject("memory");
+            return new DecimalFormat("#").format(stats.optDouble("percent", 0)) + "%";
+        } catch (Exception e) {
+            return "-";
+        }
     }
 
     private String diskText() {
@@ -1771,8 +3592,12 @@ public class MineMuxActivity extends Activity {
         button.setText(label);
         button.setContentDescription(screenTitle(page));
         button.setAllCaps(false);
-        button.setTextSize(24);
+        button.setTextSize(36);
         button.setGravity(Gravity.CENTER);
+        button.setIncludeFontPadding(false);
+        button.setPadding(0, 0, 0, 0);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
         button.setMinHeight(0);
         button.setMinimumHeight(0);
         button.setOnClickListener(v -> setPage(page));
@@ -1789,7 +3614,7 @@ public class MineMuxActivity extends Activity {
     private Button dangerButton(String label) {
         Button button = baseButton(label);
         button.setTextColor(0xffffffff);
-        button.setBackground(makeBg(RED, 0xff4a4a4a, 12));
+        button.setBackground(makeBg(DANGER_RED, DANGER_RED, 12));
         return button;
     }
 
@@ -1811,10 +3636,27 @@ public class MineMuxActivity extends Activity {
         return button;
     }
 
+    private Button iconActionButton(int drawableRes, int bg, int stroke, int tint, String description) {
+        Button button = baseButton("");
+        button.setContentDescription(description);
+        button.setBackground(makeBg(bg, stroke, 12));
+        Drawable icon = getDrawable(drawableRes);
+        if (icon != null) {
+            icon = icon.mutate();
+            icon.setTint(tint);
+            button.setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null);
+        }
+        button.setGravity(Gravity.CENTER);
+        button.setIncludeFontPadding(false);
+        button.setCompoundDrawablePadding(0);
+        button.setPadding(0, 0, 0, 0);
+        return button;
+    }
+
     private void styleTab(Button button, boolean active) {
         if (button == null) return;
         button.setTextColor(active ? 0xffffffff : MUTED);
-        button.setBackground(makeBg(active ? 0xff102510 : 0x00000000, active ? GREEN : 0x00000000, 16));
+        button.setBackground(makeBg(active ? tintFor(GREEN) : 0x00000000, active ? GREEN : 0x00000000, 16));
     }
 
     private LinearLayout column() {
@@ -1832,10 +3674,10 @@ public class MineMuxActivity extends Activity {
     private LinearLayout bottomNav() {
         LinearLayout tabs = row();
         tabs.setGravity(Gravity.CENTER);
-        tabs.setPadding(dp(10), dp(8), dp(10), dp(8));
-        tabs.setBackground(makeBg(0xff101010, STROKE, 24));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(74));
-        params.setMargins(dp(20), dp(8), dp(20), dp(18));
+        tabs.setPadding(dp(8), dp(7), dp(8), dp(7));
+        tabs.setBackground(makeBg(PANEL, STROKE, 24));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(76));
+        params.setMargins(dp(12), dp(6), dp(12), dp(14));
         tabs.setLayoutParams(params);
         return tabs;
     }
@@ -1856,7 +3698,7 @@ public class MineMuxActivity extends Activity {
         TextView pill = text(label, 13, color, true);
         pill.setGravity(Gravity.CENTER);
         pill.setPadding(dp(12), dp(6), dp(12), dp(6));
-        int bg = color == GREEN ? 0xff102510 : 0xff191919;
+        int bg = color == GREEN ? tintFor(GREEN) : PANEL_ALT;
         int stroke = color == GREEN ? GREEN : STROKE;
         pill.setBackground(makeBg(bg, stroke, 18));
         return pill;
@@ -1941,6 +3783,148 @@ public class MineMuxActivity extends Activity {
         String loader = activeLoader();
         if ("-".equals(loader)) return memoryText();
         return loader + "  " + memoryText();
+    }
+
+    private ImageView loaderIconView(String loader) {
+        ImageView view = new ImageView(this);
+        view.setImageResource(loaderIconRes(loader));
+        view.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        view.setPadding(dp(9), dp(9), dp(9), dp(9));
+        view.setBackground(makeBg(ACCENT, GREEN, 16));
+        return view;
+    }
+
+    private int loaderIconRes(String loader) {
+        String normalized = loader == null ? "" : loader.trim().toLowerCase();
+        if ("paper".equals(normalized)) return R.drawable.ic_runtime_paper;
+        if ("forge".equals(normalized)) return R.drawable.ic_runtime_forge;
+        if ("neoforge".equals(normalized)) return R.drawable.ic_runtime_neoforge;
+        if ("quilt".equals(normalized)) return R.drawable.ic_runtime_quilt;
+        if ("fabric".equals(normalized)) return R.drawable.ic_runtime_fabric;
+        if ("vanilla".equals(normalized)) return R.drawable.ic_runtime_vanilla;
+        return R.drawable.ic_runtime_unknown;
+    }
+
+    private String dashboardStatusLabel() {
+        if (serverStopping()) return "Shutting down...";
+        if (serverStarting()) return "Starting...";
+        if (startingServer) return "Starting...";
+        if (stoppingServer) return "Shutting down...";
+        if (isOverloaded()) return "Overloaded";
+        if (activeServerRunning() && serverReady()) return "Running";
+        if (activeServerInstalled()) return "Ready";
+        return "Offline";
+    }
+
+    private String serverStatusLabel(JSONObject server) {
+        JSONObject status = server.optJSONObject("server");
+        boolean running = server.optBoolean("running");
+        boolean ready = status == null ? server.optBoolean("ready", false) : status.optBoolean("ready", false);
+        boolean starting = status != null && status.optBoolean("starting", false);
+        boolean stopping = status != null && status.optBoolean("stopping", false);
+        if (stopping) return "Stopping";
+        if (starting || (running && !ready)) return "Starting";
+        if (running && ready) return "Running";
+        return server.optBoolean("installed") ? "Ready" : "Offline";
+    }
+
+    private int serverStatusColor(JSONObject server) {
+        String label = serverStatusLabel(server);
+        if ("Running".equals(label) || "Starting".equals(label) || "Stopping".equals(label)) return GREEN;
+        return MUTED;
+    }
+
+    private int dashboardStatusColor() {
+        if (isOverloaded()) return WARNING;
+        if (startingServer || stoppingServer || serverStarting() || serverStopping() || activeServerRunning()) return GREEN;
+        return MUTED;
+    }
+
+    private boolean serverReady() {
+        try {
+            return latestStatus != null && latestStatus.getJSONObject("server").optBoolean("ready", false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean serverStarting() {
+        try {
+            JSONObject server = latestStatus == null ? null : latestStatus.optJSONObject("server");
+            return server != null && server.optBoolean("starting", false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean serverStopping() {
+        try {
+            JSONObject server = latestStatus == null ? null : latestStatus.optJSONObject("server");
+            return server != null && server.optBoolean("stopping", false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void updateDashboardLiveViews() {
+        if (!"dashboard".equals(currentPage)) return;
+        TextView tps = dashboardMetricViews.get("TPS");
+        if (tps != null) tps.setText(tpsText() + " / 20");
+        TextView players = dashboardMetricViews.get("Players");
+        if (players != null) players.setText(playerCountText() + " / " + maxPlayersText());
+        TextView cpu = dashboardMetricViews.get("CPU");
+        if (cpu != null) cpu.setText(cpuText());
+        TextView memoryView = dashboardMetricViews.get("Memory");
+        if (memoryView != null) memoryView.setText(ramPercentText());
+        TextView uptime = dashboardMetricViews.get("Uptime");
+        if (uptime != null) uptime.setText(uptimeText());
+        TextView disk = dashboardMetricViews.get("Disk");
+        if (disk != null) disk.setText(serverDiskText());
+        updateDashboardGraph("TPS", tpsHistory, GREEN);
+        updateDashboardGraph("Players", playerHistory, ACCENT);
+        updateDashboardGraph("CPU", cpuHistory, TEXT);
+        updateDashboardGraph("Memory", memoryHistory, PURPLE);
+    }
+
+    private void updateDashboardGraph(String key, ArrayList<Float> history, int color) {
+        LinearLayout graph = dashboardGraphViews.get(key);
+        if (graph != null) populateMetricGraph(graph, history, color, 44);
+    }
+
+    private boolean isOverloaded() {
+        return lowTpsSinceMs > 0 && System.currentTimeMillis() - lowTpsSinceMs >= 15 * 60 * 1000L;
+    }
+
+    private void sampleDashboardHistory(JSONObject server) {
+        float tps = (float) server.optDouble("tps", 0);
+        if (tps > 0) {
+            addHistory(tpsHistory, tps * 2);
+            if (tps < 18) {
+                if (lowTpsSinceMs <= 0) lowTpsSinceMs = System.currentTimeMillis();
+            } else {
+                lowTpsSinceMs = 0;
+            }
+        }
+        addHistory(playerHistory, server.optInt("players", 0) * 4f + 8f);
+        try {
+            JSONObject system = latestStatus.getJSONObject("system");
+            addHistory(cpuHistory, (float) system.getJSONObject("cpu").optDouble("percent", 0) / 2f + 8f);
+            addHistory(memoryHistory, (float) system.getJSONObject("memory").optDouble("percent", 0) / 2f + 8f);
+        } catch (Exception ignored) {}
+    }
+
+    private void addHistory(ArrayList<Float> values, float value) {
+        values.add(clamp(Math.round(value), 8, 42) * 1f);
+        while (values.size() > 1200) values.remove(0);
+    }
+
+    private String serverDiskText() {
+        try {
+            JSONObject server = latestStatus.getJSONObject("server");
+            long value = server.optLong("storageBytes", 0);
+            if (value > 0) return bytes(value);
+        } catch (Exception ignored) {}
+        return activeServerInstalled() ? "0 KB" : "-";
     }
 
     private String loaderLabel(@Nullable JSONObject profile) {
@@ -2080,9 +4064,37 @@ public class MineMuxActivity extends Activity {
         return row;
     }
 
+    private LinearLayout themeSettingRowV2() {
+        LinearLayout row = settingRowIcon("M", "Theme", "Light / Dark / System", MUTED, null);
+        row.removeViewAt(row.getChildCount() - 1);
+        Spinner mode = spinner(new String[]{"System", "Dark", "Light"});
+        String current = preferences == null ? "System" : preferences.getString(PREF_THEME_MODE, "System");
+        if ("Dark".equalsIgnoreCase(current)) mode.setSelection(1);
+        else if ("Light".equalsIgnoreCase(current)) mode.setSelection(2);
+        else mode.setSelection(0);
+        final boolean[] ready = new boolean[]{false};
+        mode.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                String selected = String.valueOf(parent.getItemAtPosition(position));
+                if (!ready[0]) {
+                    ready[0] = true;
+                    return;
+                }
+                if (!selected.equals(themeMode)) rebuildWithTheme(selected);
+            }
+
+            @Override
+            public void onNothingSelected(android.widget.AdapterView<?> parent) {
+            }
+        });
+        row.addView(mode, new LinearLayout.LayoutParams(dp(112), dp(46)));
+        return row;
+    }
+
     private int tintFor(int color) {
-        if (color == GREEN) return 0xff102510;
-        return 0xff202020;
+        if (color == GREEN) return shouldUseDarkPalette(themeMode) ? 0xff102510 : 0xffe5f8e5;
+        return PANEL_ALT;
     }
 
     private GradientDrawable makeBg(int color, int stroke, int radius) {
@@ -2119,8 +4131,20 @@ public class MineMuxActivity extends Activity {
         return params;
     }
 
+    private LinearLayout.LayoutParams weightedMetricParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        params.setMargins(dp(3), dp(3), dp(3), dp(8));
+        return params;
+    }
+
+    private LinearLayout.LayoutParams dashboardMetricParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(118), 1);
+        params.setMargins(dp(3), dp(3), dp(3), dp(8));
+        return params;
+    }
+
     private LinearLayout.LayoutParams weightedTabParams() {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(44), 1);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(58), 1);
         params.setMargins(dp(2), 0, dp(2), 0);
         return params;
     }
@@ -2203,10 +4227,19 @@ public class MineMuxActivity extends Activity {
     }
 
     private String bytes(long value) {
-        if (value <= 0) return "Unknown size";
+        if (value <= 0) return "0 KB";
         if (value > 1024L * 1024L * 1024L) return new DecimalFormat("#.# GB").format(value / 1024.0 / 1024.0 / 1024.0);
         if (value > 1024L * 1024L) return new DecimalFormat("#.# MB").format(value / 1024.0 / 1024.0);
         return new DecimalFormat("# KB").format(value / 1024.0);
+    }
+
+    private String shortDuration(long seconds) {
+        if (seconds <= 0) return "0s";
+        long minutes = seconds / 60;
+        long hours = minutes / 60;
+        if (hours > 0) return hours + "h " + (minutes % 60) + "m";
+        if (minutes > 0) return minutes + "m " + (seconds % 60) + "s";
+        return seconds + "s";
     }
 
     private int dp(int value) {

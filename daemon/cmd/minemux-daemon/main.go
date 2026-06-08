@@ -30,14 +30,22 @@ import (
 )
 
 const (
-	defaultBindAddr = "127.0.0.1:8787"
-	defaultServerID = "main"
-	appVersion      = "0.3.0-dev"
-	userAgent       = "MineMux/0.1 local-mvp"
-	maxLogLines     = 600
+	defaultBindAddr      = "0.0.0.0:8787"
+	defaultServerID      = "main"
+	appVersion           = "0.3.0-dev"
+	userAgent            = "MineMux/0.1 local-mvp"
+	maxLogLines          = 600
+	playItPluginURL      = "https://github.com/playit-cloud/playit-minecraft-plugin/releases/latest/download/playit-minecraft-plugin.jar"
+	playItPluginFileName = "playit-minecraft-plugin.jar"
+	playItPackageName    = "playit"
 )
 
 var fallbackDNSServers = []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"}
+
+var (
+	playItClaimURLPattern = regexp.MustCompile(`https?://(?:www\.)?playit\.gg/(?:claim/[A-Za-z0-9_-]+|mc)\b[^\s<>"']*`)
+	playItTunnelPattern   = regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.gl\.(?:joinmc\.link|at\.ply\.gg)(?::[0-9]{1,5})?\b`)
+)
 
 var networkClient = &http.Client{
 	Timeout: 120 * time.Second,
@@ -59,10 +67,12 @@ type app struct {
 	startedAt      time.Time
 	home           string
 	server         *serverProcess
+	playit         *playItAgentProcess
 	activeMu       sync.RWMutex
 	activeServerID string
 	statsMu        sync.Mutex
 	lastCPU        cpuSample
+	backupMu       sync.Mutex
 }
 
 type appPaths struct {
@@ -79,18 +89,24 @@ type appPaths struct {
 }
 
 type profile struct {
-	ID                 string          `json:"id"`
-	Name               string          `json:"name"`
-	ServerType         string          `json:"serverType"`
-	MinecraftVersion   string          `json:"minecraftVersion"`
-	Loader             string          `json:"loader"`
-	JavaVersion        int             `json:"javaVersion"`
-	MemoryMB           int             `json:"memoryMb"`
-	MaxPlayers         int             `json:"maxPlayers"`
-	ViewDistance       int             `json:"viewDistance"`
-	SimulationDistance int             `json:"simulationDistance"`
-	Ports              profilePorts    `json:"ports"`
-	Features           profileFeatures `json:"features"`
+	ID                 string            `json:"id"`
+	Name               string            `json:"name"`
+	ServerType         string            `json:"serverType"`
+	MinecraftVersion   string            `json:"minecraftVersion"`
+	Loader             string            `json:"loader"`
+	Seed               string            `json:"seed,omitempty"`
+	IconPath           string            `json:"iconPath,omitempty"`
+	JavaVersion        int               `json:"javaVersion"`
+	MemoryMB           int               `json:"memoryMb"`
+	MaxPlayers         int               `json:"maxPlayers"`
+	ViewDistance       int               `json:"viewDistance"`
+	SimulationDistance int               `json:"simulationDistance"`
+	Ports              profilePorts      `json:"ports"`
+	Features           profileFeatures   `json:"features"`
+	Crossplay          crossplayConfig   `json:"crossplay,omitempty"`
+	PlayIt             playItConfig      `json:"playit,omitempty"`
+	Backups            backupPolicy      `json:"backups,omitempty"`
+	Properties         map[string]string `json:"properties,omitempty"`
 }
 
 type profilePorts struct {
@@ -104,16 +120,53 @@ type profileFeatures struct {
 	CreateRestorePointBeforeModChanges bool `json:"createRestorePointBeforeModChanges"`
 }
 
+type crossplayConfig struct {
+	Enabled          bool `json:"enabled"`
+	InstallGeyser    bool `json:"installGeyser"`
+	InstallFloodgate bool `json:"installFloodgate"`
+	Floodgate        bool `json:"floodgate"`
+	BedrockUDP       int  `json:"bedrockUdp"`
+}
+
+type playItConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+type backupPolicy struct {
+	AutoEnabled      bool       `json:"autoEnabled"`
+	IntervalMinutes  int        `json:"intervalMinutes"`
+	KeepAutoBackups  int        `json:"keepAutoBackups"`
+	LastAutoBackupAt *time.Time `json:"lastAutoBackupAt,omitempty"`
+}
+
+type playItStatus struct {
+	Enabled        bool       `json:"enabled"`
+	Detected       bool       `json:"detected"`
+	Running        bool       `json:"running"`
+	AgentInstalled bool       `json:"agentInstalled"`
+	Mode           string     `json:"mode,omitempty"`
+	ClaimURL       string     `json:"claimUrl,omitempty"`
+	Address        string     `json:"address,omitempty"`
+	Error          string     `json:"error,omitempty"`
+	StartedAt      *time.Time `json:"startedAt,omitempty"`
+}
+
 type setupRequest struct {
-	ServerID           string `json:"serverId"`
-	Name               string `json:"name"`
-	MinecraftVersion   string `json:"minecraftVersion"`
-	Loader             string `json:"loader"`
-	MemoryMB           int    `json:"memoryMb"`
-	MaxPlayers         int    `json:"maxPlayers"`
-	ViewDistance       int    `json:"viewDistance"`
-	SimulationDistance int    `json:"simulationDistance"`
-	AcceptEULA         bool   `json:"acceptEula"`
+	ServerID                string          `json:"serverId"`
+	Name                    string          `json:"name"`
+	MinecraftVersion        string          `json:"minecraftVersion"`
+	Loader                  string          `json:"loader"`
+	Seed                    string          `json:"seed"`
+	JarMode                 string          `json:"jarMode"`
+	CustomJarID             string          `json:"customJarId"`
+	MemoryMB                int             `json:"memoryMb"`
+	MaxPlayers              int             `json:"maxPlayers"`
+	ViewDistance            int             `json:"viewDistance"`
+	SimulationDistance      int             `json:"simulationDistance"`
+	PendingModrinthProjects []string        `json:"pendingModrinthProjects"`
+	Crossplay               crossplayConfig `json:"crossplay"`
+	PlayIt                  playItConfig    `json:"playit"`
+	AcceptEULA              bool            `json:"acceptEula"`
 }
 
 type switchServerRequest struct {
@@ -149,12 +202,26 @@ type minecraftVersionOption struct {
 }
 
 type configRequest struct {
-	MemoryMB           *int  `json:"memoryMb"`
-	MaxPlayers         *int  `json:"maxPlayers"`
-	ViewDistance       *int  `json:"viewDistance"`
-	SimulationDistance *int  `json:"simulationDistance"`
-	AutoStart          *bool `json:"autoStart"`
-	RestartOnCrash     *bool `json:"restartOnCrash"`
+	MemoryMB           *int    `json:"memoryMb"`
+	MaxPlayers         *int    `json:"maxPlayers"`
+	ViewDistance       *int    `json:"viewDistance"`
+	SimulationDistance *int    `json:"simulationDistance"`
+	AutoStart          *bool   `json:"autoStart"`
+	RestartOnCrash     *bool   `json:"restartOnCrash"`
+	MOTD               *string `json:"motd"`
+	ServerPort         *int    `json:"serverPort"`
+	Gamemode           *string `json:"gamemode"`
+	Difficulty         *string `json:"difficulty"`
+	PVP                *bool   `json:"pvp"`
+	OnlineMode         *bool   `json:"onlineMode"`
+	AllowFlight        *bool   `json:"allowFlight"`
+	EnableCommandBlock *bool   `json:"enableCommandBlock"`
+	SpawnProtection    *int    `json:"spawnProtection"`
+	WhiteList          *bool   `json:"whiteList"`
+	EnforceWhitelist   *bool   `json:"enforceWhitelist"`
+	AutoBackupEnabled  *bool   `json:"autoBackupEnabled"`
+	AutoBackupInterval *int    `json:"autoBackupIntervalMinutes"`
+	AutoBackupKeep     *int    `json:"autoBackupKeep"`
 }
 
 type statusResponse struct {
@@ -169,16 +236,22 @@ type statusResponse struct {
 }
 
 type serverStatus struct {
-	Installed   bool       `json:"installed"`
-	Running     bool       `json:"running"`
-	PID         int        `json:"pid,omitempty"`
-	StartedAt   *time.Time `json:"startedAt,omitempty"`
-	StoppedAt   *time.Time `json:"stoppedAt,omitempty"`
-	LastError   string     `json:"lastError,omitempty"`
-	JoinAddress string     `json:"joinAddress,omitempty"`
-	UptimeSec   int64      `json:"uptimeSec,omitempty"`
-	TPS         float64    `json:"tps,omitempty"`
-	Players     int        `json:"players"`
+	Installed    bool         `json:"installed"`
+	Running      bool         `json:"running"`
+	Ready        bool         `json:"ready"`
+	Starting     bool         `json:"starting"`
+	Stopping     bool         `json:"stopping"`
+	PID          int          `json:"pid,omitempty"`
+	StartedAt    *time.Time   `json:"startedAt,omitempty"`
+	StoppedAt    *time.Time   `json:"stoppedAt,omitempty"`
+	LastError    string       `json:"lastError,omitempty"`
+	JoinAddress  string       `json:"joinAddress,omitempty"`
+	UptimeSec    int64        `json:"uptimeSec,omitempty"`
+	TPS          float64      `json:"tps,omitempty"`
+	Players      int          `json:"players"`
+	StorageBytes int64        `json:"storageBytes,omitempty"`
+	PlayIt       playItStatus `json:"playit,omitempty"`
+	WorldSeed    string       `json:"worldSeed,omitempty"`
 }
 
 type systemStatus struct {
@@ -225,21 +298,36 @@ type serverProcess struct {
 	stoppedAt *time.Time
 	lastError string
 	logs      []string
+	ready     bool
+	stopping  bool
+}
+
+type playItAgentProcess struct {
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	done      chan error
+	startedAt *time.Time
+	lastError string
+	logs      []string
+	starting  bool
 }
 
 type modSearchHit struct {
-	ProjectID     string   `json:"project_id"`
-	Slug          string   `json:"slug"`
-	Title         string   `json:"title"`
-	Description   string   `json:"description"`
-	ProjectType   string   `json:"project_type"`
-	Categories    []string `json:"categories"`
-	Versions      []string `json:"versions"`
-	Downloads     int      `json:"downloads"`
-	ClientSide    string   `json:"client_side"`
-	ServerSide    string   `json:"server_side"`
-	IconURL       string   `json:"icon_url"`
-	LatestVersion string   `json:"latest_version"`
+	ProjectID           string   `json:"project_id"`
+	Slug                string   `json:"slug"`
+	Title               string   `json:"title"`
+	Description         string   `json:"description"`
+	ProjectType         string   `json:"project_type"`
+	Categories          []string `json:"categories"`
+	Versions            []string `json:"versions"`
+	Downloads           int      `json:"downloads"`
+	ClientSide          string   `json:"client_side"`
+	ServerSide          string   `json:"server_side"`
+	IconURL             string   `json:"icon_url"`
+	LatestVersion       string   `json:"latest_version"`
+	Compatible          bool     `json:"compatible"`
+	CompatibilityReason string   `json:"compatibilityReason,omitempty"`
+	SupportedLoaders    []string `json:"supportedLoaders,omitempty"`
 }
 
 type modSearchResponse struct {
@@ -299,10 +387,37 @@ type lockedInstall struct {
 }
 
 type backupInfo struct {
-	ID        string    `json:"id"`
+	ID        string         `json:"id"`
+	Path      string         `json:"path"`
+	SizeBytes int64          `json:"sizeBytes"`
+	CreatedAt time.Time      `json:"createdAt"`
+	Locked    bool           `json:"locked"`
+	Automatic bool           `json:"automatic"`
+	Meta      backupMetaItem `json:"meta,omitempty"`
+}
+
+type backupMetaStore struct {
+	Backups map[string]backupMetaItem `json:"backups"`
+}
+
+type backupMetaItem struct {
+	Locked    bool       `json:"locked"`
+	Automatic bool       `json:"automatic"`
+	ServerID  string     `json:"serverId,omitempty"`
+	Reason    string     `json:"reason,omitempty"`
+	CreatedAt *time.Time `json:"createdAt,omitempty"`
+}
+
+type serverFileInfo struct {
+	Name      string    `json:"name"`
 	Path      string    `json:"path"`
+	Directory bool      `json:"directory"`
 	SizeBytes int64     `json:"sizeBytes"`
-	CreatedAt time.Time `json:"createdAt"`
+	Modified  time.Time `json:"modified"`
+}
+
+type serverFilePutRequest struct {
+	Content string `json:"content"`
 }
 
 type jarDetection struct {
@@ -344,8 +459,9 @@ type paperBuild struct {
 type mojangVersionManifest struct {
 	Latest   map[string]string `json:"latest"`
 	Versions []struct {
-		ID  string `json:"id"`
-		URL string `json:"url"`
+		ID   string `json:"id"`
+		Type string `json:"type"`
+		URL  string `json:"url"`
 	} `json:"versions"`
 }
 
@@ -365,6 +481,7 @@ func main() {
 		startedAt:      time.Now().UTC(),
 		home:           home,
 		server:         &serverProcess{},
+		playit:         &playItAgentProcess{},
 		activeServerID: defaultServerID,
 	}
 	a.loadActiveServerID()
@@ -372,8 +489,10 @@ func main() {
 		log.Fatal(err)
 	}
 	a.startConfiguredServerIfNeeded()
+	a.startBackupScheduler()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /assets/app-icon.png", a.handleAppIcon)
 	mux.HandleFunc("/", a.handleIndex)
 	mux.HandleFunc("GET /api/health", a.handleHealth)
 	mux.HandleFunc("GET /api/status", a.handleStatus)
@@ -387,13 +506,23 @@ func main() {
 	mux.HandleFunc("GET /api/config", a.handleConfigGet)
 	mux.HandleFunc("POST /api/config", a.handleConfigPost)
 	mux.HandleFunc("POST /api/server/setup", a.handleServerSetup)
+	mux.HandleFunc("POST /api/server/setup/jar", a.handleServerSetupJarUpload)
 	mux.HandleFunc("POST /api/server/start", a.handleServerStart)
 	mux.HandleFunc("POST /api/server/stop", a.handleServerStop)
 	mux.HandleFunc("POST /api/server/restart", a.handleServerRestart)
 	mux.HandleFunc("GET /api/server/status", a.handleServerStatus)
 	mux.HandleFunc("GET /api/server/logs", a.handleServerLogs)
 	mux.HandleFunc("POST /api/server/command", a.handleServerCommand)
+	mux.HandleFunc("POST /api/playit/agent/start", a.handlePlayItAgentStart)
+	mux.HandleFunc("POST /api/playit/agent/stop", a.handlePlayItAgentStop)
 	mux.HandleFunc("GET /api/server/players", a.handleServerPlayers)
+	mux.HandleFunc("GET /api/server/files", a.handleServerFilesList)
+	mux.HandleFunc("GET /api/server/file", a.handleServerFileDownload)
+	mux.HandleFunc("PUT /api/server/file", a.handleServerFilePut)
+	mux.HandleFunc("DELETE /api/server/file", a.handleServerFileDelete)
+	mux.HandleFunc("POST /api/server/file/upload", a.handleServerFileUpload)
+	mux.HandleFunc("POST /api/server/icon", a.handleServerIconUpload)
+	mux.HandleFunc("POST /api/server/resource-pack", a.handleServerResourcePackUpload)
 	mux.HandleFunc("GET /api/mods", a.handleModsList)
 	mux.HandleFunc("GET /api/mods/search", a.handleModsSearch)
 	mux.HandleFunc("POST /api/mods/install", a.handleModsInstall)
@@ -405,6 +534,7 @@ func main() {
 	mux.HandleFunc("POST /api/backups/restore", a.handleBackupsRestore)
 	mux.HandleFunc("GET /api/backups/download", a.handleBackupsDownload)
 	mux.HandleFunc("POST /api/backups/upload", a.handleBackupsUpload)
+	mux.HandleFunc("POST /api/backups/lock", a.handleBackupsLock)
 	mux.HandleFunc("DELETE /api/backups/", a.handleBackupsDelete)
 	mux.HandleFunc("GET /api/diagnostics", a.handleDiagnostics)
 	mux.HandleFunc("POST /api/diagnostics/export", a.handleDiagnosticsExport)
@@ -455,7 +585,7 @@ func (a *app) paths() appPaths {
 
 func (a *app) ensureDirs() error {
 	p := a.paths()
-	for _, dir := range []string{p.Daemon, p.Runtime, p.Servers, p.ServerMain, p.Addons, p.Backups, p.Logs, p.Diagnostics, p.Repositories} {
+	for _, dir := range []string{p.Daemon, p.Runtime, p.Servers, p.Addons, p.Backups, p.Logs, p.Diagnostics, p.Repositories} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
@@ -499,9 +629,6 @@ func (a *app) loadActiveServerID() {
 
 func (a *app) setActiveServerID(id string) error {
 	id = normalizeServerID(id)
-	if err := os.MkdirAll(a.serverDir(id), 0o755); err != nil {
-		return err
-	}
 	if err := writeJSONFile(a.activeStatePath(), map[string]string{"activeServerId": id}); err != nil {
 		return err
 	}
@@ -544,6 +671,10 @@ func (a *app) lockPath() string {
 	return filepath.Join(a.paths().ServerMain, "minemux.lock")
 }
 
+func (a *app) lockPathFor(id string) string {
+	return filepath.Join(a.serverDir(id), "minemux.lock")
+}
+
 func (a *app) serverJarPath() string {
 	return filepath.Join(a.paths().ServerMain, "server.jar")
 }
@@ -553,11 +684,22 @@ func (a *app) loadProfile() (*profile, error) {
 	if err := readJSONFile(a.profilePath(), &p); err != nil {
 		return nil, err
 	}
+	normalizeBackupPolicy(&p)
 	return &p, nil
 }
 
 func (a *app) saveProfile(p *profile) error {
+	normalizeBackupPolicy(p)
 	return writeJSONFile(a.profilePath(), p)
+}
+
+func (a *app) saveProfileFor(id string, p *profile) error {
+	id = normalizeServerID(id)
+	if err := os.MkdirAll(a.serverDir(id), 0o755); err != nil {
+		return err
+	}
+	normalizeBackupPolicy(p)
+	return writeJSONFile(a.profilePathFor(id), p)
 }
 
 func (a *app) defaultProfile(mcVersion string, javaVersion int) profile {
@@ -584,7 +726,26 @@ func (a *app) defaultProfile(mcVersion string, javaVersion int) profile {
 			RestartOnCrash:                     true,
 			CreateRestorePointBeforeModChanges: true,
 		},
+		Backups: backupPolicy{
+			AutoEnabled:     false,
+			IntervalMinutes: 360,
+			KeepAutoBackups: 5,
+		},
 	}
+}
+
+func normalizeBackupPolicy(p *profile) {
+	if p == nil {
+		return
+	}
+	if p.Backups.IntervalMinutes <= 0 {
+		p.Backups.IntervalMinutes = 360
+	}
+	p.Backups.IntervalMinutes = clampInt(p.Backups.IntervalMinutes, 15, 10080)
+	if p.Backups.KeepAutoBackups <= 0 {
+		p.Backups.KeepAutoBackups = 5
+	}
+	p.Backups.KeepAutoBackups = clampInt(p.Backups.KeepAutoBackups, 1, 100)
 }
 
 func (a *app) status() statusResponse {
@@ -616,6 +777,45 @@ func (a *app) startConfiguredServerIfNeeded() {
 	}()
 }
 
+func (a *app) startBackupScheduler() {
+	go func() {
+		timer := time.NewTimer(45 * time.Second)
+		defer timer.Stop()
+		for {
+			<-timer.C
+			a.runAutoBackupIfDue()
+			timer.Reset(60 * time.Second)
+		}
+	}()
+}
+
+func (a *app) runAutoBackupIfDue() {
+	p, err := a.loadProfile()
+	if err != nil || p == nil {
+		return
+	}
+	normalizeBackupPolicy(p)
+	if !p.Backups.AutoEnabled || !a.serverInstalled(p) {
+		return
+	}
+	now := time.Now().UTC()
+	interval := time.Duration(p.Backups.IntervalMinutes) * time.Minute
+	if p.Backups.LastAutoBackupAt != nil && now.Sub(*p.Backups.LastAutoBackupAt) < interval {
+		return
+	}
+	a.server.mu.Lock()
+	a.server.appendLogLocked("Creating scheduled backup")
+	a.server.mu.Unlock()
+	if _, err := a.createBackup("auto"); err != nil {
+		a.server.mu.Lock()
+		a.server.appendLogLocked("Scheduled backup failed: " + err.Error())
+		a.server.mu.Unlock()
+		return
+	}
+	p.Backups.LastAutoBackupAt = &now
+	_ = a.saveProfile(p)
+}
+
 func (a *app) systemStatus() systemStatus {
 	return systemStatus{
 		CPU:    a.cpuStatus(),
@@ -626,6 +826,10 @@ func (a *app) systemStatus() systemStatus {
 
 func (a *app) cpuStatus() cpuStatus {
 	status := cpuStatus{Cores: runtime.NumCPU()}
+	if topPercent, err := readCPUPercentFromTop(); err == nil && topPercent > 0 {
+		status.Percent = topPercent
+		return status
+	}
 	sample, err := readCPUSample()
 	if err != nil || sample.total == 0 {
 		return status
@@ -641,6 +845,124 @@ func (a *app) cpuStatus() cpuStatus {
 	}
 	a.lastCPU = sample
 	return status
+}
+
+func readCPUPercentFromTop() (float64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	cmd := exec.CommandContext(ctx, "top", "-b", "-n", "1")
+	out, err := cmd.CombinedOutput()
+	cancel()
+	if err != nil || len(out) == 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		cmd = exec.CommandContext(ctx, "top", "-n", "1")
+		out, err = cmd.CombinedOutput()
+	}
+	if err != nil {
+		return 0, err
+	}
+	text := string(out)
+	if percent, ok := parseTopProcessCPUPercent(text, runtime.NumCPU()); ok {
+		return clampFloat(percent, 0, 100), nil
+	}
+	for _, line := range strings.Split(text, "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if strings.Contains(lower, "%cpu") || strings.Contains(lower, "cpu:") || strings.Contains(lower, "%cpu(s)") || strings.Contains(lower, "%cpu(s):") || strings.Contains(lower, "%cpu") || strings.Contains(lower, "cpu(s):") {
+			if percent, ok := parseTopCPUPercent(lower); ok {
+				return clampFloat(percent, 0, 100), nil
+			}
+		}
+	}
+	return 0, errors.New("top output did not include CPU summary")
+}
+
+func parseTopProcessCPUPercent(output string, cores int) (float64, bool) {
+	if cores <= 0 {
+		cores = 1
+	}
+	taskCount := 0
+	taskRe := regexp.MustCompile(`(?i)tasks:\s*([0-9]+)\s+total`)
+	headerSeen := false
+	processRows := 0
+	total := 0.0
+
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		lower := strings.ToLower(line)
+		if match := taskRe.FindStringSubmatch(lower); len(match) == 2 {
+			taskCount, _ = strconv.Atoi(match[1])
+		}
+		if strings.Contains(lower, "pid") && strings.Contains(lower, "%cpu") {
+			headerSeen = true
+			processRows = 0
+			total = 0
+			continue
+		}
+		if !headerSeen || line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !allDigits(fields[0]) {
+			continue
+		}
+		if value, ok := cpuValueFromTopProcessFields(fields); ok {
+			total += value
+			processRows++
+			if taskCount > 0 && processRows >= taskCount {
+				break
+			}
+		}
+	}
+	if processRows == 0 {
+		return 0, false
+	}
+	return total / float64(cores), true
+}
+
+func cpuValueFromTopProcessFields(fields []string) (float64, bool) {
+	states := map[string]bool{"R": true, "S": true, "D": true, "T": true, "Z": true, "I": true}
+	for i := 1; i < len(fields)-1; i++ {
+		if states[strings.ToUpper(fields[i])] {
+			value, err := strconv.ParseFloat(strings.TrimSuffix(fields[i+1], "%"), 64)
+			return value, err == nil
+		}
+	}
+	return 0, false
+}
+
+func allDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseTopCPUPercent(line string) (float64, bool) {
+	if idx := strings.Index(line, " id"); idx > 0 {
+		before := strings.TrimSpace(line[:idx])
+		fields := strings.Fields(strings.ReplaceAll(strings.ReplaceAll(before, ",", " "), "%", " "))
+		if len(fields) > 0 {
+			if idle, err := strconv.ParseFloat(fields[len(fields)-1], 64); err == nil {
+				return 100 - idle, true
+			}
+		}
+	}
+	re := regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)%?\s*(usr|user|us|sys|system|sy|nice|nic)`)
+	matches := re.FindAllStringSubmatch(line, -1)
+	if len(matches) > 0 {
+		total := 0.0
+		for _, match := range matches {
+			value, _ := strconv.ParseFloat(match[1], 64)
+			total += value
+		}
+		return total, true
+	}
+	return 0, false
 }
 
 func readCPUSample() (cpuSample, error) {
@@ -747,20 +1069,49 @@ func clampFloat(value, min, max float64) float64 {
 }
 
 func (s *serverProcess) start(ctx context.Context, a *app, p *profile) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.startWithOptions(ctx, a, p, false)
+}
 
-	if s.cmd != nil && s.cmd.Process != nil {
+func (s *serverProcess) startWithOptions(ctx context.Context, a *app, p *profile, bypassCooldown bool) error {
+	s.mu.Lock()
+	alreadyRunning := s.cmd != nil && s.cmd.Process != nil
+	coolingDown := !bypassCooldown && s.stoppedAt != nil && time.Since(*s.stoppedAt) < 30*time.Second
+	s.mu.Unlock()
+
+	if alreadyRunning {
 		return errors.New("server is already running")
+	}
+	if coolingDown {
+		return errors.New("server just stopped; wait a few seconds before starting it again")
 	}
 	if p == nil {
 		return errors.New("server profile is missing; run setup first")
 	}
+	if err := a.ensurePlayItPluginBeforeStart(p); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+
+	if s.cmd != nil && s.cmd.Process != nil {
+		s.mu.Unlock()
+		return errors.New("server is already running")
+	}
+	if !bypassCooldown && s.stoppedAt != nil && time.Since(*s.stoppedAt) < 30*time.Second {
+		s.mu.Unlock()
+		return errors.New("server just stopped; wait a few seconds before starting it again")
+	}
+	if p == nil {
+		s.mu.Unlock()
+		return errors.New("server profile is missing; run setup first")
+	}
 	command, args, err := a.startCommand(p)
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if ok, err := eulaAccepted(filepath.Join(a.paths().ServerMain, "eula.txt")); err != nil || !ok {
+		s.mu.Unlock()
 		if err != nil {
 			return err
 		}
@@ -772,17 +1123,21 @@ func (s *serverProcess) start(ctx context.Context, a *app, p *profile) error {
 	cmd.Env = cleanJavaEnv(os.Environ())
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if err := cmd.Start(); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 
@@ -794,13 +1149,30 @@ func (s *serverProcess) start(ctx context.Context, a *app, p *profile) error {
 	s.startedAt = &now
 	s.stoppedAt = nil
 	s.lastError = ""
+	s.ready = false
+	s.stopping = false
 	s.appendLogLocked(fmt.Sprintf("%s server started with pid %d", p.Loader, cmd.Process.Pid))
 
 	go s.capture(stdout)
 	go s.capture(stderr)
 	go s.wait(cmd, done)
+	s.mu.Unlock()
 
 	return nil
+}
+
+func (a *app) ensurePlayItPluginBeforeStart(p *profile) error {
+	if p == nil || !p.PlayIt.Enabled || !strings.EqualFold(p.Loader, "paper") {
+		return nil
+	}
+	targetPath := filepath.Join(a.paths().ServerMain, "plugins", playItPluginFileName)
+	if _, err := os.Stat(targetPath); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	a.appendSetupLog("PlayIt enabled but plugin is missing; installing before server start")
+	return a.installPlayItPlugin(p)
 }
 
 func (a *app) startCommand(p *profile) (string, []string, error) {
@@ -815,28 +1187,61 @@ func (a *app) startCommand(p *profile) (string, []string, error) {
 		if _, err := os.Stat(filepath.Join(a.paths().ServerMain, "quilt-server-launch.jar")); err == nil {
 			return "java", javaJarArgs(p, "quilt-server-launch.jar"), nil
 		}
+	case "fabric":
+		if _, err := os.Stat(filepath.Join(a.paths().ServerMain, "fabric-server-launch.jar")); err == nil {
+			return "java", javaJarArgs(p, "fabric-server-launch.jar"), nil
+		}
+		if _, err := os.Stat(filepath.Join(a.paths().ServerMain, "fabric-server-launcher.jar")); err == nil {
+			return "java", javaJarArgs(p, "fabric-server-launcher.jar"), nil
+		}
 	}
 	return "java", javaJarArgs(p, "server.jar"), nil
 }
 
 func javaJarArgs(p *profile, jar string) []string {
-	return []string{
+	args := []string{
 		"-Dterminal.jline=false",
 		"-Dterminal.ansi=false",
 		"-Djna.nosys=true",
-		fmt.Sprintf("-Xms%dM", minInt(p.MemoryMB, 1024)),
-		fmt.Sprintf("-Xmx%dM", p.MemoryMB),
+	}
+	if p != nil && p.PlayIt.Enabled && strings.EqualFold(p.Loader, "paper") {
+		args = append(args,
+			"-Djava.net.preferIPv4Stack=true",
+			"-Djava.net.preferIPv6Addresses=false",
+		)
+	}
+	memoryMB := 1024
+	if p != nil && p.MemoryMB > 0 {
+		memoryMB = p.MemoryMB
+	}
+	args = append(args,
+		fmt.Sprintf("-Xms%dM", minInt(memoryMB, 1024)),
+		fmt.Sprintf("-Xmx%dM", memoryMB),
 		"-jar",
 		jar,
 		"nogui",
-	}
+	)
+	return args
 }
 
 func (s *serverProcess) stop(timeout time.Duration) error {
+	return s.stopWithOptions(timeout, false)
+}
+
+func (s *serverProcess) stopWithOptions(timeout time.Duration, allowDuringStartup bool) error {
 	s.mu.Lock()
 	cmd := s.cmd
 	stdin := s.stdin
 	done := s.done
+	startedAt := s.startedAt
+	ready := s.ready
+	if cmd != nil && cmd.Process != nil {
+		if !allowDuringStartup && startedAt != nil && !ready && time.Since(*startedAt) < 30*time.Second {
+			s.mu.Unlock()
+			return errors.New("server is still starting; wait until startup finishes before stopping")
+		}
+		s.stopping = true
+	}
 	s.mu.Unlock()
 
 	if cmd == nil || cmd.Process == nil {
@@ -859,10 +1264,10 @@ func (s *serverProcess) stop(timeout time.Duration) error {
 }
 
 func (s *serverProcess) restart(ctx context.Context, a *app, p *profile) error {
-	if err := s.stop(30 * time.Second); err != nil && err.Error() != "server is not running" {
+	if err := s.stopWithOptions(30*time.Second, true); err != nil && err.Error() != "server is not running" {
 		return err
 	}
-	return s.start(ctx, a, p)
+	return s.startWithOptions(ctx, a, p, true)
 }
 
 func (s *serverProcess) send(command string) error {
@@ -884,6 +1289,7 @@ func (s *serverProcess) status(a *app) serverStatus {
 	defer s.mu.Unlock()
 
 	p, _ := a.loadProfile()
+	lines := dedupeTailLines(append(tailTextFile(filepath.Join(a.paths().ServerMain, "logs", "latest.log"), maxLogLines), s.logs...), maxLogLines)
 	status := serverStatus{
 		Installed: a.serverInstalled(p),
 		Running:   s.cmd != nil && s.cmd.Process != nil,
@@ -898,13 +1304,149 @@ func (s *serverProcess) status(a *app) serverStatus {
 		}
 		status.TPS = 20
 	}
-	status.Players = countPlayersFromLogs(s.logs)
+	status.Ready = status.Running && s.ready
+	status.Starting = status.Running && !s.ready && !s.stopping
+	status.Stopping = status.Running && s.stopping
+	if status.Installed {
+		status.StorageBytes = directorySize(a.paths().ServerMain)
+	}
+	if status.Running && s.ready {
+		status.Players = countPlayersFromLogs(lines)
+	}
 	port := 25565
 	if p != nil && p.Ports.JavaTCP > 0 {
 		port = p.Ports.JavaTCP
 	}
 	status.JoinAddress = localJoinAddress(port)
+	status.PlayIt = a.playItStatus(p, lines)
+	status.WorldSeed = worldSeedFromProfileAndLogs(p, lines)
 	return status
+}
+
+func (a *app) playItStatus(p *profile, serverLines []string) playItStatus {
+	lines := append([]string{}, serverLines...)
+	lines = append(lines, a.playit.logLines()...)
+	status := playItStatusFromLogs(p, lines)
+	status.Mode = "plugin"
+	agentRunning, agentStartedAt, errorText := a.playit.state(status.Error)
+	status.Running = agentRunning
+	status.StartedAt = agentStartedAt
+	status.Error = errorText
+	if agentRunning || agentStartedAt != nil {
+		status.Mode = "agent-fallback"
+	}
+	status.AgentInstalled = playItExecutablePath() != ""
+	return status
+}
+
+func worldSeedFromProfileAndLogs(p *profile, lines []string) string {
+	seed := ""
+	if p != nil {
+		seed = strings.TrimSpace(p.Seed)
+		if seed == "" && p.Properties != nil {
+			seed = strings.TrimSpace(p.Properties["level-seed"])
+		}
+	}
+	for _, line := range lines {
+		if found := seedFromLogLine(line); found != "" {
+			seed = found
+		}
+	}
+	return seed
+}
+
+func seedFromLogLine(line string) string {
+	lower := strings.ToLower(line)
+	index := strings.Index(lower, "seed:")
+	if index < 0 {
+		return ""
+	}
+	value := strings.TrimSpace(line[index+len("seed:"):])
+	value = strings.TrimPrefix(value, "[")
+	value = strings.TrimSuffix(value, "]")
+	value = strings.Trim(value, " \t\r\n.,;")
+	if value == "" {
+		return ""
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && r != '-' {
+			return ""
+		}
+	}
+	return value
+}
+
+func playItStatusFromLogs(p *profile, lines []string) playItStatus {
+	status := playItStatus{}
+	if p != nil {
+		status.Enabled = p.PlayIt.Enabled
+	}
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "playit") {
+			status.Detected = true
+		}
+		if playItSecretVerified(lower) && strings.Contains(strings.ToLower(status.Error), "claim") {
+			status.Error = ""
+		}
+		if err := playItErrorFromLogLine(lower); err != "" {
+			status.Error = err
+			status.Detected = true
+		}
+		if status.ClaimURL == "" {
+			if url := firstPlayItClaimURL(line); url != "" {
+				status.ClaimURL = url
+				status.Detected = true
+			}
+		}
+		if status.Address == "" {
+			if address := firstPlayItTunnelAddress(line); address != "" {
+				status.Address = address
+				status.Error = ""
+				status.Detected = true
+			}
+		}
+	}
+	return status
+}
+
+func playItSecretVerified(lower string) bool {
+	return strings.Contains(lower, "secret verified") ||
+		strings.Contains(lower, "keys setup complete") ||
+		strings.Contains(lower, "ready to connect")
+}
+
+func playItErrorFromLogLine(lower string) string {
+	switch {
+	case strings.Contains(lower, "unsupportedaddresstypeexception"):
+		return "PlayIt hit an Android IPv6 socket issue. Set the PlayIt agent/tunnel to IPv4 only; use the fallback agent only if the plugin still fails."
+	case strings.Contains(lower, "address family not supported") ||
+		strings.Contains(lower, "network is unreachable") ||
+		strings.Contains(lower, "failed to send initial ping") ||
+		strings.Contains(lower, "failed to reload_control_addr"):
+		return "PlayIt agent could not connect to tunnel control servers. Check mobile data/Wi-Fi, VPN, private DNS, and retry."
+	case strings.Contains(lower, "failed to get control addresses") ||
+		strings.Contains(lower, "failed when communicating with tunnel server"):
+		return "PlayIt could not reach its tunnel control servers. Check mobile data/Wi-Fi, VPN, private DNS, and try again."
+	case strings.Contains(lower, "api error code: 400") && strings.Contains(lower, "codenotfound"):
+		return "PlayIt claim code was not accepted yet or expired. Open the latest claim link and try again."
+	default:
+		return ""
+	}
+}
+
+func firstPlayItClaimURL(line string) string {
+	return cleanPlayItMatch(playItClaimURLPattern.FindString(line))
+}
+
+func firstPlayItTunnelAddress(line string) string {
+	return cleanPlayItMatch(playItTunnelPattern.FindString(line))
+}
+
+func cleanPlayItMatch(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimRight(value, ".,);]}>\"'")
+	return value
 }
 
 func (a *app) serverInstalled(p *profile) bool {
@@ -922,6 +1464,12 @@ func serverDirInstalled(dir string, p *profile) bool {
 		return err == nil
 	case "quilt":
 		_, err := os.Stat(filepath.Join(dir, "quilt-server-launch.jar"))
+		return err == nil
+	case "fabric":
+		if _, err := os.Stat(filepath.Join(dir, "fabric-server-launch.jar")); err == nil {
+			return true
+		}
+		_, err := os.Stat(filepath.Join(dir, "fabric-server-launcher.jar"))
 		return err == nil
 	default:
 		_, err := os.Stat(filepath.Join(dir, "server.jar"))
@@ -978,6 +1526,285 @@ func (s *serverProcess) logLines() []string {
 	return out
 }
 
+func (a *app) mergedServerLogLines(limit int) []string {
+	lines := append([]string{}, tailTextFile(filepath.Join(a.paths().ServerMain, "logs", "latest.log"), limit)...)
+	lines = append(lines, a.server.logLines()...)
+	lines = append(lines, a.playit.logLines()...)
+	if limit <= 0 {
+		limit = maxLogLines
+	}
+	return dedupeTailLines(lines, limit)
+}
+
+func (a *app) playItDir() string {
+	return filepath.Join(a.home, "playit")
+}
+
+func (a *app) playItSecretPath() string {
+	return filepath.Join(a.playItDir(), "playit.toml")
+}
+
+func (a *app) startPlayItAgentForProfile(p *profile) {
+	if p == nil || !p.PlayIt.Enabled {
+		return
+	}
+	if err := a.playit.start(context.Background(), a); err != nil {
+		a.playit.setError(err.Error())
+		a.server.mu.Lock()
+		a.server.appendLogLocked("PlayIt agent failed: " + err.Error())
+		a.server.mu.Unlock()
+	}
+}
+
+func (p *playItAgentProcess) start(ctx context.Context, a *app) error {
+	p.mu.Lock()
+	if p.cmd != nil && p.cmd.Process != nil || p.starting {
+		p.mu.Unlock()
+		return nil
+	}
+	p.starting = true
+	p.lastError = ""
+	p.mu.Unlock()
+	startFailed := true
+	defer func() {
+		if startFailed {
+			p.mu.Lock()
+			p.starting = false
+			p.mu.Unlock()
+		}
+	}()
+
+	if err := a.ensurePlayItAgentInstalled(func(line string) {
+		p.appendLog("install: " + line)
+	}); err != nil {
+		return err
+	}
+	executable := playItExecutablePath()
+	if executable == "" {
+		return errors.New("playit-cli is not installed; open Terminal and run: pkg install tur-repo playit")
+	}
+	if err := os.MkdirAll(a.playItDir(), 0o700); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, executable, "-s")
+	cmd.Dir = a.playItDir()
+	cmd.Env = append(cleanJavaEnv(os.Environ()),
+		"PLAYIT_SECRET_PATH="+a.playItSecretPath(),
+		"XDG_CONFIG_HOME="+filepath.Join(a.home, ".config"),
+	)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	done := make(chan error, 1)
+	p.mu.Lock()
+	p.cmd = cmd
+	p.done = done
+	p.startedAt = &now
+	p.starting = false
+	p.appendLogLocked("PlayIt agent started with pid " + strconv.Itoa(cmd.Process.Pid))
+	p.mu.Unlock()
+	startFailed = false
+
+	go p.capture(stdout)
+	go p.capture(stderr)
+	go p.wait(cmd, done)
+	return nil
+}
+
+func (p *playItAgentProcess) stop(timeout time.Duration) error {
+	p.mu.Lock()
+	cmd := p.cmd
+	done := p.done
+	p.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	_ = cmd.Process.Kill()
+	select {
+	case <-time.After(timeout):
+		return errors.New("timed out stopping PlayIt agent")
+	case err := <-done:
+		return err
+	}
+}
+
+func (p *playItAgentProcess) capture(r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		p.appendLog(line)
+	}
+	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "file already closed") {
+		p.setError(err.Error())
+		p.appendLog("log capture error: " + err.Error())
+	}
+}
+
+func (p *playItAgentProcess) wait(cmd *exec.Cmd, done chan error) {
+	err := cmd.Wait()
+	done <- err
+	close(done)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cmd != cmd {
+		return
+	}
+	p.cmd = nil
+	p.done = nil
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "signal: killed") {
+			p.lastError = ""
+			p.appendLogLocked("PlayIt agent stopped")
+			return
+		}
+		p.lastError = err.Error()
+		p.appendLogLocked("PlayIt agent stopped with error: " + err.Error())
+		return
+	}
+	p.appendLogLocked("PlayIt agent stopped")
+}
+
+func (p *playItAgentProcess) logLines() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.logs))
+	copy(out, p.logs)
+	return out
+}
+
+func (p *playItAgentProcess) state(existingError string) (bool, *time.Time, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	running := p.starting || (p.cmd != nil && p.cmd.Process != nil)
+	startedAt := p.startedAt
+	err := existingError
+	if p.lastError != "" {
+		err = p.lastError
+	}
+	return running, startedAt, err
+}
+
+func (p *playItAgentProcess) appendLog(line string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.appendLogLocked(line)
+}
+
+func (p *playItAgentProcess) setError(err string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lastError = err
+}
+
+func (p *playItAgentProcess) appendLogLocked(line string) {
+	entry := time.Now().UTC().Format(time.RFC3339) + " [PlayIt] " + line
+	p.logs = append(p.logs, entry)
+	if len(p.logs) > maxLogLines {
+		p.logs = p.logs[len(p.logs)-maxLogLines:]
+	}
+}
+
+func (a *app) ensurePlayItAgentInstalled(logLine func(string)) error {
+	if playItExecutablePath() != "" {
+		return nil
+	}
+	if err := ensureTermuxDNSConfigured(); err != nil && logLine != nil {
+		logLine("Could not update Termux DNS resolver before PlayIt install: " + err.Error())
+	}
+	if _, err := exec.LookPath("pkg"); err != nil {
+		return errors.New("Termux pkg is unavailable; open Terminal and run: pkg install tur-repo playit")
+	}
+	for _, args := range [][]string{
+		{"install", "-y", "tur-repo"},
+		{"install", "-y", playItPackageName},
+	} {
+		if logLine != nil {
+			logLine("Running pkg " + strings.Join(args, " "))
+		}
+		cmd := exec.Command("pkg", args...)
+		cmd.Env = cleanJavaEnv(os.Environ())
+		if err := runCommandStreaming(cmd, logLine); err != nil && logLine != nil {
+			logLine("pkg " + strings.Join(args, " ") + " failed: " + err.Error())
+		}
+	}
+	if playItExecutablePath() == "" {
+		return errors.New("could not install PlayIt agent; open Terminal and run: pkg install tur-repo playit")
+	}
+	return nil
+}
+
+func playItExecutablePath() string {
+	for _, name := range []string{"playit-cli", "playit"} {
+		if path, err := exec.LookPath(name); err == nil && path != "" {
+			return path
+		}
+	}
+	for _, path := range []string{
+		"/data/data/com.termux/files/usr/bin/playit-cli",
+		"/data/data/com.termux/files/usr/bin/playit",
+	} {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	return ""
+}
+
+func tailTextFile(path string, limit int) []string {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return []string{}
+	}
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	raw := strings.Split(text, "\n")
+	lines := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if limit > 0 && len(lines) > limit {
+		lines = lines[len(lines)-limit:]
+	}
+	return lines
+}
+
+func dedupeTailLines(lines []string, limit int) []string {
+	start := 0
+	if limit > 0 && len(lines) > limit*2 {
+		start = len(lines) - limit*2
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, line := range lines[start:] {
+		key := strings.TrimSpace(line)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, line)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out
+}
+
 func (s *serverProcess) capture(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -1009,6 +1836,8 @@ func (s *serverProcess) wait(cmd *exec.Cmd, done chan error) {
 	s.stdin = nil
 	s.done = nil
 	s.cmd = nil
+	s.ready = false
+	s.stopping = false
 	if err != nil {
 		s.lastError = err.Error()
 		s.appendLogLocked("Paper server stopped with error: " + err.Error())
@@ -1020,6 +1849,11 @@ func (s *serverProcess) wait(cmd *exec.Cmd, done chan error) {
 func (s *serverProcess) appendLogLocked(line string) {
 	entry := time.Now().UTC().Format(time.RFC3339) + " " + line
 	s.logs = append(s.logs, entry)
+	lower := strings.ToLower(line)
+	if strings.Contains(lower, "for help, type") || (strings.Contains(lower, "done (") && strings.Contains(lower, "s)!")) {
+		s.ready = true
+		s.stopping = false
+	}
 	if len(s.logs) > maxLogLines {
 		s.logs = s.logs[len(s.logs)-maxLogLines:]
 	}
@@ -1045,6 +1879,20 @@ func (a *app) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusNotFound, apiError{Error: "web UI not found"})
+}
+
+func (a *app) handleAppIcon(w http.ResponseWriter, r *http.Request) {
+	for _, iconPath := range []string{
+		filepath.Join(a.home, "webui", "app-icon.png"),
+		filepath.Join("..", "webui", "app-icon.png"),
+	} {
+		if _, err := os.Stat(iconPath); err == nil {
+			w.Header().Set("Content-Type", "image/png")
+			http.ServeFile(w, r, iconPath)
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, apiError{Error: "app icon not found"})
 }
 
 func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -1112,6 +1960,7 @@ func (a *app) handleServersSwitch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, apiError{Error: "stop the running server before switching profiles"})
 		return
 	}
+	_ = a.playit.stop(5 * time.Second)
 	if _, err := os.Stat(a.profilePathFor(id)); err != nil {
 		writeJSON(w, http.StatusNotFound, apiError{Error: "server profile not found"})
 		return
@@ -1133,6 +1982,9 @@ func (a *app) handleServersDelete(w http.ResponseWriter, r *http.Request) {
 	if id == activeID && a.server.status(a).Running {
 		writeJSON(w, http.StatusConflict, apiError{Error: "stop the running server before deleting it"})
 		return
+	}
+	if id == activeID {
+		_ = a.playit.stop(5 * time.Second)
 	}
 	dir := a.serverDir(id)
 	if _, err := os.Stat(dir); err != nil {
@@ -1157,7 +2009,11 @@ func (a *app) handleServersDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleConfigGet(w http.ResponseWriter, r *http.Request) {
-	p, err := a.loadProfile()
+	id := normalizeServerID(r.URL.Query().Get("serverId"))
+	if strings.TrimSpace(r.URL.Query().Get("serverId")) == "" {
+		id = a.activeServerIDValue()
+	}
+	p, err := a.loadProfileFor(id)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
 		return
@@ -1166,7 +2022,11 @@ func (a *app) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleConfigPost(w http.ResponseWriter, r *http.Request) {
-	p, err := a.loadProfile()
+	id := normalizeServerID(r.URL.Query().Get("serverId"))
+	if strings.TrimSpace(r.URL.Query().Get("serverId")) == "" {
+		id = a.activeServerIDValue()
+	}
+	p, err := a.loadProfileFor(id)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
 		return
@@ -1183,10 +2043,10 @@ func (a *app) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 		p.MaxPlayers = clampInt(*req.MaxPlayers, 1, 50)
 	}
 	if req.ViewDistance != nil {
-		p.ViewDistance = clampInt(*req.ViewDistance, 2, 16)
+		p.ViewDistance = clampInt(*req.ViewDistance, 2, 32)
 	}
 	if req.SimulationDistance != nil {
-		p.SimulationDistance = clampInt(*req.SimulationDistance, 2, 16)
+		p.SimulationDistance = clampInt(*req.SimulationDistance, 2, 32)
 	}
 	if req.AutoStart != nil {
 		p.Features.AutoStart = *req.AutoStart
@@ -1194,11 +2054,59 @@ func (a *app) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 	if req.RestartOnCrash != nil {
 		p.Features.RestartOnCrash = *req.RestartOnCrash
 	}
-	if err := a.saveProfile(p); err != nil {
+	if req.ServerPort != nil {
+		p.Ports.JavaTCP = clampInt(*req.ServerPort, 1024, 65535)
+	}
+	if p.Properties == nil {
+		p.Properties = map[string]string{}
+	}
+	if req.MOTD != nil {
+		p.Properties["motd"] = strings.TrimSpace(*req.MOTD)
+	}
+	if p.Seed != "" {
+		p.Properties["level-seed"] = p.Seed
+	}
+	if req.Gamemode != nil {
+		p.Properties["gamemode"] = enumString(*req.Gamemode, "survival", []string{"survival", "creative", "adventure", "spectator"})
+	}
+	if req.Difficulty != nil {
+		p.Properties["difficulty"] = enumString(*req.Difficulty, "normal", []string{"peaceful", "easy", "normal", "hard"})
+	}
+	if req.PVP != nil {
+		p.Properties["pvp"] = strconv.FormatBool(*req.PVP)
+	}
+	if req.OnlineMode != nil {
+		p.Properties["online-mode"] = strconv.FormatBool(*req.OnlineMode)
+	}
+	if req.AllowFlight != nil {
+		p.Properties["allow-flight"] = strconv.FormatBool(*req.AllowFlight)
+	}
+	if req.EnableCommandBlock != nil {
+		p.Properties["enable-command-block"] = strconv.FormatBool(*req.EnableCommandBlock)
+	}
+	if req.SpawnProtection != nil {
+		p.Properties["spawn-protection"] = strconv.Itoa(clampInt(*req.SpawnProtection, 0, 64))
+	}
+	if req.WhiteList != nil {
+		p.Properties["white-list"] = strconv.FormatBool(*req.WhiteList)
+	}
+	if req.EnforceWhitelist != nil {
+		p.Properties["enforce-whitelist"] = strconv.FormatBool(*req.EnforceWhitelist)
+	}
+	if req.AutoBackupEnabled != nil {
+		p.Backups.AutoEnabled = *req.AutoBackupEnabled
+	}
+	if req.AutoBackupInterval != nil {
+		p.Backups.IntervalMinutes = clampInt(*req.AutoBackupInterval, 15, 10080)
+	}
+	if req.AutoBackupKeep != nil {
+		p.Backups.KeepAutoBackups = clampInt(*req.AutoBackupKeep, 1, 100)
+	}
+	if err := a.saveProfileFor(id, p); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
-	if err := writeServerProperties(a.paths().ServerMain, p); err != nil {
+	if err := writeServerProperties(a.serverDir(id), p); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
@@ -1252,7 +2160,7 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 		a.server.mu.Lock()
 		a.server.appendLogLocked("Java not found; installing OpenJDK package")
 		a.server.mu.Unlock()
-		if err := ensureJavaInstalled(); err != nil {
+		if err := ensureJavaInstalledWithLog(a.appendSetupLog); err != nil {
 			writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 			return
 		}
@@ -1271,20 +2179,39 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Loader = loader
 	p.ServerType = loader
+	p.Seed = strings.TrimSpace(req.Seed)
 	if req.MemoryMB > 0 {
-		p.MemoryMB = clampInt(req.MemoryMB, 512, 8192)
+		p.MemoryMB = clampInt(req.MemoryMB, 1024, maxInt(1024, systemMemoryMB()*80/100))
 	}
 	if req.MaxPlayers > 0 {
 		p.MaxPlayers = clampInt(req.MaxPlayers, 1, 50)
 	}
 	if req.ViewDistance > 0 {
-		p.ViewDistance = clampInt(req.ViewDistance, 2, 16)
+		p.ViewDistance = clampInt(req.ViewDistance, 2, 32)
 	}
 	if req.SimulationDistance > 0 {
-		p.SimulationDistance = clampInt(req.SimulationDistance, 2, 16)
+		p.SimulationDistance = clampInt(req.SimulationDistance, 2, 32)
+	}
+	if err := os.MkdirAll(a.paths().ServerMain, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	p.Crossplay = req.Crossplay
+	if p.Crossplay.BedrockUDP <= 0 {
+		p.Crossplay.BedrockUDP = 19132
+	}
+	p.PlayIt = req.PlayIt
+	if !strings.EqualFold(p.Loader, "paper") {
+		p.PlayIt.Enabled = false
+	}
+	if p.Properties == nil {
+		p.Properties = map[string]string{}
+	}
+	if p.Seed != "" {
+		p.Properties["level-seed"] = p.Seed
 	}
 
-	resolvedVersion, err := a.installServerRuntime(&p, javaMajor)
+	resolvedVersion, err := a.installSetupRuntime(&p, javaMajor, req)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 		return
@@ -1315,7 +2242,127 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
+	a.installSetupAddons(&p, req)
 	writeJSON(w, http.StatusOK, a.status())
+}
+
+func (a *app) installSetupRuntime(p *profile, javaMajor int, req setupRequest) (string, error) {
+	if strings.EqualFold(req.JarMode, "custom") && strings.TrimSpace(req.CustomJarID) != "" {
+		source := filepath.Join(a.paths().Runtime, "setup-uploads", filepath.Base(req.CustomJarID)+".jar")
+		if _, err := os.Stat(source); err != nil {
+			return "", errors.New("custom setup jar is missing; upload it again")
+		}
+		a.appendSetupLog("Installing uploaded custom server.jar")
+		if err := copyFile(source, a.serverJarPath()); err != nil {
+			return "", err
+		}
+		_ = os.Remove(source)
+		if p.MinecraftVersion == "" || p.MinecraftVersion == "latest-compatible" {
+			p.MinecraftVersion = latestFallbackMinecraftVersion(javaMajor)
+		}
+		return p.MinecraftVersion, nil
+	}
+	return a.installServerRuntime(p, javaMajor)
+}
+
+func (a *app) installSetupAddons(p *profile, req setupRequest) {
+	projects := append([]string{}, req.PendingModrinthProjects...)
+	if req.Crossplay.Enabled {
+		if req.Crossplay.InstallGeyser {
+			projects = append(projects, "geyser")
+		}
+		if req.Crossplay.InstallFloodgate || req.Crossplay.Floodgate {
+			projects = append(projects, "floodgate")
+		}
+	}
+	if req.PlayIt.Enabled && strings.EqualFold(p.Loader, "paper") {
+		if err := a.installPlayItPlugin(p); err != nil {
+			a.appendSetupLog("PlayIt plugin install failed: " + err.Error())
+			a.appendSetupLog("Standalone PlayIt agent can be used as fallback from the dashboard if needed.")
+		}
+		a.appendSetupLog("If PlayIt shows IPv6/control-channel errors on Android, set the PlayIt agent/tunnel to IPv4 only in the PlayIt dashboard.")
+		if req.Crossplay.Enabled {
+			a.appendSetupLog("PlayIt plugin handles Java TCP. Bedrock UDP needs a separate PlayIt agent/tunnel path.")
+		}
+	} else if req.PlayIt.Enabled {
+		a.appendSetupLog("PlayIt plugin setup skipped: the built-in plugin is currently available for Paper/Spigot-style servers.")
+	}
+	seen := map[string]bool{}
+	for _, project := range projects {
+		project = strings.TrimSpace(project)
+		if project == "" || seen[project] {
+			continue
+		}
+		seen[project] = true
+		a.appendSetupLog("Installing add-on: " + project)
+		if _, err := a.installModrinthProject(p, project, "", map[string]bool{}); err != nil {
+			a.appendSetupLog("Add-on skipped: " + project + " - " + err.Error())
+		}
+	}
+}
+
+func (a *app) installPlayItPlugin(p *profile) error {
+	if !strings.EqualFold(p.Loader, "paper") {
+		return fmt.Errorf("the PlayIt Minecraft plugin only loads on Paper/Bukkit servers; %s needs the standalone PlayIt agent", p.Loader)
+	}
+	targetDir := filepath.Join(a.paths().ServerMain, "plugins")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return err
+	}
+	targetPath := filepath.Join(targetDir, playItPluginFileName)
+	a.appendSetupLog("Downloading PlayIt plugin from GitHub")
+	if err := downloadFile(playItPluginURL, targetPath); err != nil {
+		_ = os.Remove(targetPath)
+		return err
+	}
+	lock, _ := a.loadLockfile()
+	lock.MinecraftVersion = p.MinecraftVersion
+	lock.Loader = p.Loader
+	lock.Installed = upsertInstall(lock.Installed, lockedInstall{
+		Source:       "github",
+		ProjectID:    "playit-minecraft-plugin",
+		Name:         "PlayIt Minecraft Plugin",
+		FileName:     playItPluginFileName,
+		TargetFolder: "plugins",
+		InstalledAt:  time.Now().UTC(),
+	})
+	if err := a.saveLockfile(lock); err != nil {
+		return err
+	}
+	a.appendSetupLog("Installed PlayIt plugin to plugins/" + playItPluginFileName)
+	return nil
+}
+
+func (a *app) handleServerSetupJarUpload(w http.ResponseWriter, r *http.Request) {
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "multipart field 'file' is required"})
+		return
+	}
+	defer file.Close()
+	name := filepath.Base(header.Filename)
+	if !strings.HasSuffix(strings.ToLower(name), ".jar") {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "only .jar uploads are supported"})
+		return
+	}
+	dir := filepath.Join(a.paths().Runtime, "setup-uploads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	id := safeName(strings.TrimSuffix(name, filepath.Ext(name))) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
+	target := filepath.Join(dir, id+".jar")
+	out, err := os.Create(target)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, file); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"customJarId": id, "fileName": name})
 }
 
 func (a *app) handleServerStart(w http.ResponseWriter, r *http.Request) {
@@ -1340,6 +2387,7 @@ func (a *app) handleServerStop(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, apiError{Error: err.Error()})
 		return
 	}
+	_ = a.playit.stop(5 * time.Second)
 	writeJSON(w, http.StatusAccepted, a.server.status(a))
 }
 
@@ -1365,7 +2413,7 @@ func (a *app) handleServerStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleServerLogs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string][]string{"lines": a.server.logLines()})
+	writeJSON(w, http.StatusOK, map[string][]string{"lines": a.mergedServerLogLines(maxLogLines)})
 }
 
 func (a *app) handleServerCommand(w http.ResponseWriter, r *http.Request) {
@@ -1385,13 +2433,306 @@ func (a *app) handleServerCommand(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "sent"})
 }
 
+func (a *app) handlePlayItAgentStart(w http.ResponseWriter, r *http.Request) {
+	p, err := a.loadProfile()
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
+		return
+	}
+	if !p.PlayIt.Enabled {
+		writeJSON(w, http.StatusConflict, apiError{Error: "PlayIt is not enabled for this server"})
+		return
+	}
+	go a.startPlayItAgentForProfile(p)
+	writeJSON(w, http.StatusAccepted, a.server.status(a))
+}
+
+func (a *app) handlePlayItAgentStop(w http.ResponseWriter, r *http.Request) {
+	if err := a.playit.stop(5 * time.Second); err != nil {
+		writeJSON(w, http.StatusConflict, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, a.server.status(a))
+}
+
 func (a *app) handleServerPlayers(w http.ResponseWriter, r *http.Request) {
-	players := playersFromLogs(a.server.logLines())
+	status := a.server.status(a)
+	if !status.Running || !status.Ready {
+		writeJSON(w, http.StatusOK, map[string]any{"online": 0, "players": []string{}})
+		return
+	}
+	players := playersFromLogs(a.mergedServerLogLines(maxLogLines))
 	writeJSON(w, http.StatusOK, map[string]any{"online": len(players), "players": players})
 }
 
+func (a *app) handleServerFilesList(w http.ResponseWriter, r *http.Request) {
+	target, rel, err := a.safeServerPathFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	files := make([]serverFileInfo, 0, len(entries))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		childRel := strings.TrimPrefix(filepath.ToSlash(filepath.Join(rel, entry.Name())), "/")
+		files = append(files, serverFileInfo{
+			Name:      entry.Name(),
+			Path:      childRel,
+			Directory: entry.IsDir(),
+			SizeBytes: info.Size(),
+			Modified:  info.ModTime(),
+		})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].Directory != files[j].Directory {
+			return files[i].Directory
+		}
+		return strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name)
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"path": rel, "files": files})
+}
+
+func (a *app) handleServerFileDownload(w http.ResponseWriter, r *http.Request) {
+	target, rel, err := a.safeServerPathFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "file not found"})
+		return
+	}
+	if info.IsDir() {
+		name := filepath.Base(target)
+		if rel == "" {
+			name = a.activeServerIDValue()
+		}
+		tmp, err := os.CreateTemp(a.paths().Runtime, safeName(name)+"-*.zip")
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		tmpPath := tmp.Name()
+		_ = tmp.Close()
+		defer os.Remove(tmpPath)
+		if err := zipDirectory(target, tmpPath, nil); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(safeName(name)+".zip"))
+		http.ServeFile(w, r, tmpPath)
+		return
+	}
+	if r.URL.Query().Get("raw") == "1" {
+		data, err := os.ReadFile(target)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"content": string(data)})
+		return
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(filepath.Base(target)))
+	http.ServeFile(w, r, target)
+}
+
+func (a *app) handleServerFilePut(w http.ResponseWriter, r *http.Request) {
+	target, _, err := a.safeServerPathFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	var req serverFilePutRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if err := os.WriteFile(target, []byte(req.Content), 0o644); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+func (a *app) handleServerFileDelete(w http.ResponseWriter, r *http.Request) {
+	target, _, err := a.safeServerPathFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	if target == a.paths().ServerMain {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "cannot delete server root"})
+		return
+	}
+	if err := os.RemoveAll(target); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (a *app) handleServerFileUpload(w http.ResponseWriter, r *http.Request) {
+	id := serverIDFromRequest(a, r)
+	dir, _, err := a.safeServerPathFor(id, r.URL.Query().Get("path"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	if err := r.ParseMultipartForm(128 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "missing file upload"})
+		return
+	}
+	defer file.Close()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	target := filepath.Join(dir, filepath.Base(header.Filename))
+	out, err := os.Create(target)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, file); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	root := a.serverDir(id)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "uploaded", "path": filepath.ToSlash(strings.TrimPrefix(target, root+string(os.PathSeparator)))})
+}
+
+func (a *app) safeServerPathFromRequest(r *http.Request) (string, string, error) {
+	return a.safeServerPathFor(serverIDFromRequest(a, r), r.URL.Query().Get("path"))
+}
+
+func serverIDFromRequest(a *app, r *http.Request) string {
+	if strings.TrimSpace(r.URL.Query().Get("serverId")) == "" {
+		return a.activeServerIDValue()
+	}
+	return normalizeServerID(r.URL.Query().Get("serverId"))
+}
+
+func (a *app) handleServerIconUpload(w http.ResponseWriter, r *http.Request) {
+	id := normalizeServerID(r.URL.Query().Get("serverId"))
+	if strings.TrimSpace(r.URL.Query().Get("serverId")) == "" {
+		id = a.activeServerIDValue()
+	}
+	p, err := a.loadProfileFor(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "server profile not found"})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "multipart field 'file' is required"})
+		return
+	}
+	defer file.Close()
+	name := strings.ToLower(filepath.Base(header.Filename))
+	if !strings.HasSuffix(name, ".png") {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "server icons must be PNG files"})
+		return
+	}
+	target := filepath.Join(a.serverDir(id), "server-icon.png")
+	out, err := os.Create(target)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if _, err := io.Copy(out, file); err != nil {
+		_ = out.Close()
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if err := out.Close(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	p.IconPath = "server-icon.png"
+	if err := a.saveProfileFor(id, p); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "uploaded", "iconPath": p.IconPath})
+}
+
+func (a *app) handleServerResourcePackUpload(w http.ResponseWriter, r *http.Request) {
+	id := serverIDFromRequest(a, r)
+	p, err := a.loadProfileFor(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "multipart field 'file' is required"})
+		return
+	}
+	defer file.Close()
+	name := strings.ToLower(filepath.Base(header.Filename))
+	if !strings.HasSuffix(name, ".zip") {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "resource packs must be .zip files"})
+		return
+	}
+	target := filepath.Join(a.serverDir(id), "resource-pack.zip")
+	out, err := os.Create(target)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if _, err := io.Copy(out, file); err != nil {
+		_ = out.Close()
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if err := out.Close(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	sha, _ := sha1File(target)
+	if p.Properties == nil {
+		p.Properties = map[string]string{}
+	}
+	p.Properties["resource-pack"] = "http://" + localIP() + ":8787/api/server/file?path=resource-pack.zip"
+	p.Properties["resource-pack-sha1"] = sha
+	p.Properties["resource-pack-prompt"] = "MineMux server resource pack"
+	if err := a.saveProfileFor(id, p); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if err := writeServerProperties(a.serverDir(id), p); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "uploaded", "sha1": sha})
+}
+
 func (a *app) handleModsList(w http.ResponseWriter, r *http.Request) {
-	lock, err := a.loadLockfile()
+	id := normalizeServerID(r.URL.Query().Get("serverId"))
+	if strings.TrimSpace(r.URL.Query().Get("serverId")) == "" {
+		id = a.activeServerIDValue()
+	}
+	lock, err := a.loadLockfileFor(id)
 	if err != nil {
 		writeJSON(w, http.StatusOK, lockfile{Installed: []lockedInstall{}})
 		return
@@ -1400,10 +2741,22 @@ func (a *app) handleModsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleModsSearch(w http.ResponseWriter, r *http.Request) {
-	p, err := a.loadProfile()
+	id := normalizeServerID(r.URL.Query().Get("serverId"))
+	var p *profile
+	var err error
+	if strings.TrimSpace(r.URL.Query().Get("serverId")) != "" {
+		p, err = a.loadProfileFor(id)
+	} else {
+		p, err = a.loadProfile()
+	}
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
-		return
+		loader := strings.TrimSpace(r.URL.Query().Get("loader"))
+		version := strings.TrimSpace(r.URL.Query().Get("minecraftVersion"))
+		if loader == "" || version == "" {
+			writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
+			return
+		}
+		p = &profile{Loader: strings.ToLower(loader), MinecraftVersion: version}
 	}
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
 	if query == "" {
@@ -1419,14 +2772,18 @@ func (a *app) handleModsSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleModsInstall(w http.ResponseWriter, r *http.Request) {
-	p, err := a.loadProfile()
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
-		return
-	}
 	var req installModRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
+		return
+	}
+	id := normalizeServerID(r.URL.Query().Get("serverId"))
+	if strings.TrimSpace(r.URL.Query().Get("serverId")) == "" {
+		id = a.activeServerIDValue()
+	}
+	p, err := a.loadProfileFor(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
 		return
 	}
 	if req.ProjectID == "" {
@@ -1434,12 +2791,12 @@ func (a *app) handleModsInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Features.CreateRestorePointBeforeModChanges {
-		if _, err := a.createBackup("before-mod-install"); err != nil {
+		if _, err := a.createBackupFor(id, "before-mod-install"); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: "restore point failed: " + err.Error()})
 			return
 		}
 	}
-	installed, err := a.installModrinthProject(p, req.ProjectID, req.VersionID, map[string]bool{})
+	installed, err := a.installModrinthProjectFor(id, p, req.ProjectID, req.VersionID, map[string]bool{})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 		return
@@ -1453,7 +2810,8 @@ func (a *app) handleModsUninstall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "fileName query parameter is required"})
 		return
 	}
-	lock, err := a.loadLockfile()
+	id := serverIDFromRequest(a, r)
+	lock, err := a.loadLockfileFor(id)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, apiError{Error: "lockfile not found"})
 		return
@@ -1462,7 +2820,7 @@ func (a *app) handleModsUninstall(w http.ResponseWriter, r *http.Request) {
 	removed := false
 	for _, item := range lock.Installed {
 		if item.FileName == fileName {
-			path := filepath.Join(a.paths().ServerMain, item.TargetFolder, item.FileName)
+			path := filepath.Join(a.serverDir(id), item.TargetFolder, item.FileName)
 			_ = os.Remove(path)
 			removed = true
 			continue
@@ -1470,7 +2828,7 @@ func (a *app) handleModsUninstall(w http.ResponseWriter, r *http.Request) {
 		next = append(next, item)
 	}
 	lock.Installed = next
-	if err := a.saveLockfile(lock); err != nil {
+	if err := a.saveLockfileFor(id, lock); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
@@ -1478,13 +2836,14 @@ func (a *app) handleModsUninstall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleModsUpload(w http.ResponseWriter, r *http.Request) {
-	p, err := a.loadProfile()
+	id := serverIDFromRequest(a, r)
+	p, err := a.loadProfileFor(id)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
 		return
 	}
 	if p.Features.CreateRestorePointBeforeModChanges {
-		if _, err := a.createBackup("before-jar-upload"); err != nil {
+		if _, err := a.createBackupFor(id, "before-jar-upload"); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: "restore point failed: " + err.Error()})
 			return
 		}
@@ -1495,14 +2854,14 @@ func (a *app) handleModsUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	detection, item, err := a.saveUploadedJar(p, file, header)
+	detection, item, err := a.saveUploadedJarFor(id, p, file, header)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
-	lock, _ := a.loadLockfile()
+	lock, _ := a.loadLockfileFor(id)
 	lock.Installed = upsertInstall(lock.Installed, item)
-	if err := a.saveLockfile(lock); err != nil {
+	if err := a.saveLockfileFor(id, lock); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
@@ -1529,11 +2888,21 @@ func (a *app) handleBackupsList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
+	if strings.TrimSpace(r.URL.Query().Get("serverId")) != "" {
+		id := normalizeServerID(r.URL.Query().Get("serverId"))
+		filtered := backups[:0]
+		for _, backup := range backups {
+			if backup.Meta.ServerID == id {
+				filtered = append(filtered, backup)
+			}
+		}
+		backups = filtered
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"backups": backups})
 }
 
 func (a *app) handleBackupsCreate(w http.ResponseWriter, r *http.Request) {
-	info, err := a.createBackup("manual")
+	info, err := a.createBackupFor(serverIDFromRequest(a, r), "manual")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
@@ -1593,6 +2962,42 @@ func (a *app) handleBackupsUpload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
+func (a *app) handleBackupsLock(w http.ResponseWriter, r *http.Request) {
+	id := filepath.Base(strings.TrimSpace(r.URL.Query().Get("id")))
+	if id == "" || id == "." {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "id query parameter is required"})
+		return
+	}
+	var req struct {
+		Locked bool `json:"locked"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
+		return
+	}
+	if _, err := os.Stat(filepath.Join(a.paths().Backups, id+".zip")); err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: err.Error()})
+		return
+	}
+	meta, err := a.loadBackupMeta()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	item := meta.Backups[id]
+	item.Locked = req.Locked
+	if item.Reason == "" {
+		item.Reason = backupReasonFromID(id)
+	}
+	meta.Backups[id] = item
+	if err := a.saveBackupMeta(meta); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	backups, _ := a.listBackups()
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "locked": req.Locked, "backups": backups})
+}
+
 func (a *app) handleBackupsDelete(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/backups/")
 	id = filepath.Base(id)
@@ -1604,6 +3009,7 @@ func (a *app) handleBackupsDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, apiError{Error: err.Error()})
 		return
 	}
+	_ = a.removeBackupMeta(id)
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": id})
 }
 
@@ -1653,6 +3059,8 @@ func (a *app) listServers() ([]serverSummary, error) {
 		var loaded profile
 		if err := readJSONFile(filepath.Join(dir, "profile.json"), &loaded); err == nil {
 			p = &loaded
+		} else {
+			continue
 		}
 		installed := serverDirInstalled(dir, p)
 		name := titleFromServerID(id)
@@ -1702,6 +3110,48 @@ func lastRunAtForServer(dir string) *time.Time {
 	return nil
 }
 
+func directorySize(dir string) int64 {
+	var total int64
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+func (a *app) safeServerPath(raw string) (string, string, error) {
+	return a.safeServerPathFor(a.activeServerIDValue(), raw)
+}
+
+func (a *app) safeServerPathFor(id, raw string) (string, string, error) {
+	root, err := filepath.Abs(a.serverDir(id))
+	if err != nil {
+		return "", "", err
+	}
+	cleaned := filepath.Clean(strings.TrimPrefix(strings.ReplaceAll(raw, "\\", "/"), "/"))
+	if cleaned == "." {
+		cleaned = ""
+	}
+	target, err := filepath.Abs(filepath.Join(root, cleaned))
+	if err != nil {
+		return "", "", err
+	}
+	if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
+		return "", "", errors.New("path escapes server directory")
+	}
+	rel, _ := filepath.Rel(root, target)
+	if rel == "." {
+		rel = ""
+	}
+	return target, filepath.ToSlash(rel), nil
+}
+
 func (a *app) firstExistingServerID(fallback string) string {
 	servers, err := a.listServers()
 	if err != nil {
@@ -1733,6 +3183,7 @@ func (a *app) deleteBackupsForServer(id string, p *profile) int {
 		for _, name := range names {
 			if name != "" && strings.HasPrefix(backupName, name+"-") {
 				if err := os.Remove(filepath.Join(a.paths().Backups, entry.Name())); err == nil {
+					_ = a.removeBackupMeta(backupName)
 					deleted++
 				}
 				break
@@ -1769,6 +3220,14 @@ func loaderOptions() []loaderOption {
 			Description:  "Lightweight mod loader installed through the Quilt installer.",
 		},
 		{
+			ID:           "fabric",
+			Name:         "Fabric",
+			Kind:         "mod",
+			Supported:    true,
+			TargetFolder: "mods",
+			Description:  "Lightweight mod loader with broad server mod support.",
+		},
+		{
 			ID:           "forge",
 			Name:         "Forge",
 			Kind:         "mod",
@@ -1789,7 +3248,7 @@ func loaderOptions() []loaderOption {
 
 func supportedLoader(loader string) bool {
 	switch strings.ToLower(strings.TrimSpace(loader)) {
-	case "paper", "vanilla", "quilt", "forge", "neoforge":
+	case "paper", "vanilla", "quilt", "fabric", "forge", "neoforge":
 		return true
 	default:
 		return false
@@ -1823,6 +3282,25 @@ func (a *app) installServerRuntime(p *profile, javaMajor int) (string, error) {
 		}
 		a.appendSetupLog("Running Quilt server installer")
 		if err := a.runInstaller("java", "-jar", installerPath, "install", "server", version, "--download-server", "--install-dir="+a.paths().ServerMain); err != nil {
+			return "", err
+		}
+		return version, nil
+	case "fabric":
+		version := p.MinecraftVersion
+		if version == "" || version == "latest-compatible" {
+			version = latestFallbackMinecraftVersion(javaMajor)
+		}
+		a.appendSetupLog("Downloading Fabric installer")
+		installer, err := latestMavenInstaller("https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml", "https://maven.fabricmc.net/net/fabricmc/fabric-installer")
+		if err != nil {
+			return "", err
+		}
+		installerPath := filepath.Join(a.paths().ServerMain, "fabric-installer.jar")
+		if err := downloadFile(installer, installerPath); err != nil {
+			return "", err
+		}
+		a.appendSetupLog("Running Fabric server installer")
+		if err := a.runInstaller("java", "-jar", installerPath, "server", "-mcversion", version, "-downloadMinecraft", "-dir", a.paths().ServerMain); err != nil {
 			return "", err
 		}
 		return version, nil
@@ -1883,26 +3361,52 @@ func (a *app) runInstaller(command string, args ...string) error {
 	cmd := exec.Command(command, args...)
 	cmd.Dir = a.paths().ServerMain
 	cmd.Env = cleanJavaEnv(os.Environ())
-	out, err := cmd.CombinedOutput()
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			a.appendSetupLog(line)
-		}
-	}
-	return err
+	return runCommandStreaming(cmd, a.appendSetupLog)
 }
 
 func minecraftVersionOptions(javaMajor int) ([]minecraftVersionOption, string, string) {
-	versions, err := fetchPaperMinecraftVersions(javaMajor)
+	versions, err := fetchMojangReleaseVersions(javaMajor)
+	if err == nil && len(versions) > 0 {
+		return versions, "mojang", ""
+	}
+	mojangErr := err
+	versions, err = fetchPaperMinecraftVersions(javaMajor)
 	if err == nil && len(versions) > 0 {
 		return versions, "papermc", ""
 	}
 	warning := ""
-	if err != nil {
+	if mojangErr != nil {
+		warning = mojangErr.Error()
+	} else if err != nil {
 		warning = err.Error()
 	}
 	return fallbackMinecraftVersions(javaMajor), "fallback", warning
+}
+
+func fetchMojangReleaseVersions(javaMajor int) ([]minecraftVersionOption, error) {
+	var manifest mojangVersionManifest
+	if err := getJSON("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json", &manifest); err != nil {
+		return nil, err
+	}
+	options := make([]minecraftVersionOption, 0, len(manifest.Versions))
+	recommendedSet := false
+	for _, entry := range manifest.Versions {
+		if entry.ID == "" || entry.Type != "release" {
+			continue
+		}
+		minimum := javaMinimumForMinecraft(entry.ID)
+		if javaMajor > 0 && minimum > javaMajor {
+			continue
+		}
+		options = append(options, minecraftVersionOption{
+			ID:          entry.ID,
+			JavaMinimum: minimum,
+			Support:     "release",
+			Recommended: !recommendedSet,
+		})
+		recommendedSet = true
+	}
+	return options, nil
 }
 
 func fetchPaperMinecraftVersions(javaMajor int) ([]minecraftVersionOption, error) {
@@ -1953,6 +3457,34 @@ func fallbackMinecraftVersions(javaMajor int) []minecraftVersionOption {
 		filtered = append(filtered, option)
 	}
 	return filtered
+}
+
+func javaMinimumForMinecraft(version string) int {
+	major, minor, patch := parseMinecraftVersion(version)
+	if major != 1 {
+		return 21
+	}
+	if minor > 20 || (minor == 20 && patch >= 5) {
+		return 21
+	}
+	if minor >= 18 {
+		return 17
+	}
+	if minor == 17 {
+		return 16
+	}
+	return 8
+}
+
+func parseMinecraftVersion(version string) (int, int, int) {
+	parts := strings.Split(version, ".")
+	out := []int{0, 0, 0}
+	for i := 0; i < len(parts) && i < len(out); i++ {
+		value := strings.TrimLeft(parts[i], "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_")
+		parsed, _ := strconv.Atoi(value)
+		out[i] = parsed
+	}
+	return out[0], out[1], out[2]
 }
 
 func latestFallbackMinecraftVersion(javaMajor int) string {
@@ -2106,31 +3638,159 @@ func neoForgeVersionPrefix(mcVersion string) string {
 }
 
 func searchModrinth(query string, p *profile) (*modSearchResponse, error) {
-	facets := fmt.Sprintf("[[\"versions:%s\"],[\"categories:%s\"]]", p.MinecraftVersion, p.Loader)
+	compatibleFacets := fmt.Sprintf("[[\"versions:%s\"],[\"categories:%s\"]]", p.MinecraftVersion, p.Loader)
+	versionFacets := fmt.Sprintf("[[\"versions:%s\"]]", p.MinecraftVersion)
+	compatible, err := searchModrinthRaw(query, compatibleFacets, 20)
+	if err != nil {
+		return nil, err
+	}
+	broader, err := searchModrinthRaw(query, versionFacets, 30)
+	if err != nil {
+		broader = &modSearchResponse{}
+	}
+	seen := map[string]bool{}
+	out := modSearchResponse{Limit: 30}
+	for _, source := range []*modSearchResponse{compatible, broader} {
+		for _, hit := range source.Hits {
+			id := hit.ProjectID
+			if id == "" {
+				id = hit.Slug
+			}
+			if id == "" || seen[id] || hit.ServerSide == "unsupported" {
+				continue
+			}
+			seen[id] = true
+			hit = annotateModrinthCompatibility(hit, p)
+			out.Hits = append(out.Hits, hit)
+		}
+	}
+	sort.SliceStable(out.Hits, func(i, j int) bool {
+		if out.Hits[i].Compatible != out.Hits[j].Compatible {
+			return out.Hits[i].Compatible
+		}
+		return out.Hits[i].Downloads > out.Hits[j].Downloads
+	})
+	out.TotalHits = len(out.Hits)
+	return &out, nil
+}
+
+func searchModrinthRaw(query, facets string, limit int) (*modSearchResponse, error) {
 	endpoint, _ := url.Parse("https://api.modrinth.com/v2/search")
 	q := endpoint.Query()
 	q.Set("query", query)
-	q.Set("limit", "20")
-	q.Set("facets", facets)
+	q.Set("limit", strconv.Itoa(limit))
+	if facets != "" {
+		q.Set("facets", facets)
+	}
 	endpoint.RawQuery = q.Encode()
 
 	var res modSearchResponse
 	if err := getJSON(endpoint.String(), &res); err != nil {
 		return nil, err
 	}
-	filtered := res.Hits[:0]
-	for _, hit := range res.Hits {
-		if hit.ServerSide == "unsupported" {
-			continue
-		}
-		filtered = append(filtered, hit)
-	}
-	res.Hits = filtered
-	res.TotalHits = len(filtered)
 	return &res, nil
 }
 
+func annotateModrinthCompatibility(hit modSearchHit, p *profile) modSearchHit {
+	hit.SupportedLoaders = supportedLoadersFromCategories(hit.Categories)
+	versionOK := p == nil || p.MinecraftVersion == "" || p.MinecraftVersion == "latest-compatible" || stringSliceContains(hit.Versions, p.MinecraftVersion)
+	loaderOK := p == nil || loaderMatchesCategories(p.Loader, hit.Categories)
+	hit.Compatible = versionOK && loaderOK
+	switch {
+	case hit.Compatible:
+		hit.CompatibilityReason = "Compatible with this server"
+	case !versionOK && !loaderOK:
+		hit.CompatibilityReason = fmt.Sprintf("No release for Minecraft %s and %s", p.MinecraftVersion, displayLoader(p.Loader))
+	case !versionOK:
+		hit.CompatibilityReason = "No release for Minecraft " + p.MinecraftVersion
+	case !loaderOK:
+		loaders := strings.Join(hit.SupportedLoaders, ", ")
+		if loaders == "" {
+			loaders = "other loaders"
+		}
+		hit.CompatibilityReason = fmt.Sprintf("Requires %s, not %s", loaders, displayLoader(p.Loader))
+	}
+	return hit
+}
+
+func supportedLoadersFromCategories(categories []string) []string {
+	known := map[string]bool{
+		"bukkit": true, "spigot": true, "paper": true, "purpur": true, "folia": true,
+		"fabric": true, "quilt": true, "forge": true, "neoforge": true,
+	}
+	out := []string{}
+	for _, category := range categories {
+		category = strings.ToLower(strings.TrimSpace(category))
+		if known[category] && !stringSliceContains(out, displayLoader(category)) {
+			out = append(out, displayLoader(category))
+		}
+	}
+	return out
+}
+
+func loaderMatchesCategories(loader string, categories []string) bool {
+	aliases := loaderAliases(loader)
+	for _, category := range categories {
+		category = strings.ToLower(strings.TrimSpace(category))
+		for _, alias := range aliases {
+			if category == alias {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func loaderAliases(loader string) []string {
+	switch strings.ToLower(strings.TrimSpace(loader)) {
+	case "paper":
+		return []string{"paper", "bukkit", "spigot", "purpur", "folia"}
+	case "neoforge":
+		return []string{"neoforge"}
+	case "forge":
+		return []string{"forge"}
+	case "quilt":
+		return []string{"quilt"}
+	case "fabric":
+		return []string{"fabric"}
+	default:
+		return []string{strings.ToLower(strings.TrimSpace(loader))}
+	}
+}
+
+func displayLoader(loader string) string {
+	switch strings.ToLower(strings.TrimSpace(loader)) {
+	case "neoforge":
+		return "NeoForge"
+	case "paper":
+		return "Paper"
+	case "fabric":
+		return "Fabric"
+	case "quilt":
+		return "Quilt"
+	case "forge":
+		return "Forge"
+	case "vanilla":
+		return "Vanilla"
+	default:
+		return strings.TrimSpace(loader)
+	}
+}
+
+func stringSliceContains(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(needle)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *app) installModrinthProject(p *profile, projectID, versionID string, seen map[string]bool) ([]lockedInstall, error) {
+	return a.installModrinthProjectFor(a.activeServerIDValue(), p, projectID, versionID, seen)
+}
+
+func (a *app) installModrinthProjectFor(serverID string, p *profile, projectID, versionID string, seen map[string]bool) ([]lockedInstall, error) {
 	if seen[projectID] {
 		return nil, nil
 	}
@@ -2144,11 +3804,19 @@ func (a *app) installModrinthProject(p *profile, projectID, versionID string, se
 	if err != nil {
 		return nil, err
 	}
-	targetFolder := "plugins"
-	if p.Loader == "fabric" {
-		targetFolder = "mods"
+	installed := []lockedInstall{}
+	for _, dep := range version.Dependencies {
+		if dep.DependencyType != "required" {
+			continue
+		}
+		depInstalled, err := a.installModrinthDependencyFor(serverID, p, dep, seen)
+		if err != nil {
+			return nil, err
+		}
+		installed = append(installed, depInstalled...)
 	}
-	targetDir := filepath.Join(a.paths().ServerMain, targetFolder)
+	targetFolder := targetFolderForLoader(p.Loader)
+	targetDir := filepath.Join(a.serverDir(serverID), targetFolder)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -2168,26 +3836,46 @@ func (a *app) installModrinthProject(p *profile, projectID, versionID string, se
 		InstalledAt:  time.Now().UTC(),
 		PhoneSafety:  phoneSafety(version.Name, file.Size),
 	}
-	lock, _ := a.loadLockfile()
+	lock, _ := a.loadLockfileFor(serverID)
 	lock.MinecraftVersion = p.MinecraftVersion
 	lock.Loader = p.Loader
 	lock.Installed = upsertInstall(lock.Installed, item)
-	if err := a.saveLockfile(lock); err != nil {
+	if err := a.saveLockfileFor(serverID, lock); err != nil {
 		return nil, err
 	}
 
-	installed := []lockedInstall{item}
-	for _, dep := range version.Dependencies {
-		if dep.DependencyType != "required" || dep.ProjectID == "" {
-			continue
-		}
-		depInstalled, err := a.installModrinthProject(p, dep.ProjectID, dep.VersionID, seen)
-		if err != nil {
-			return nil, err
-		}
-		installed = append(installed, depInstalled...)
-	}
+	installed = append(installed, item)
 	return installed, nil
+}
+
+func (a *app) installModrinthDependency(p *profile, dep modrinthDependency, seen map[string]bool) ([]lockedInstall, error) {
+	return a.installModrinthDependencyFor(a.activeServerIDValue(), p, dep, seen)
+}
+
+func (a *app) installModrinthDependencyFor(serverID string, p *profile, dep modrinthDependency, seen map[string]bool) ([]lockedInstall, error) {
+	if dep.ProjectID != "" {
+		return a.installModrinthProjectFor(serverID, p, dep.ProjectID, dep.VersionID, seen)
+	}
+	if dep.VersionID == "" {
+		return nil, nil
+	}
+	version, err := resolveModrinthVersion(p, "", dep.VersionID)
+	if err != nil {
+		return nil, err
+	}
+	if version.ProjectID == "" {
+		return nil, errors.New("required dependency has no project id")
+	}
+	return a.installModrinthProjectFor(serverID, p, version.ProjectID, version.ID, seen)
+}
+
+func targetFolderForLoader(loader string) string {
+	switch strings.ToLower(strings.TrimSpace(loader)) {
+	case "forge", "neoforge", "quilt", "fabric":
+		return "mods"
+	default:
+		return "plugins"
+	}
 }
 
 func resolveModrinthVersion(p *profile, projectID, versionID string) (*modrinthVersion, error) {
@@ -2246,8 +3934,29 @@ func (a *app) loadLockfile() (lockfile, error) {
 	return lock, nil
 }
 
+func (a *app) loadLockfileFor(id string) (lockfile, error) {
+	p, _ := a.loadProfileFor(id)
+	lock := lockfile{}
+	if p != nil {
+		lock.MinecraftVersion = p.MinecraftVersion
+		lock.Loader = p.Loader
+	}
+	if err := readJSONFile(a.lockPathFor(id), &lock); err != nil {
+		return lock, err
+	}
+	return lock, nil
+}
+
 func (a *app) saveLockfile(lock lockfile) error {
 	return writeJSONFile(a.lockPath(), lock)
+}
+
+func (a *app) saveLockfileFor(id string, lock lockfile) error {
+	id = normalizeServerID(id)
+	if err := os.MkdirAll(a.serverDir(id), 0o755); err != nil {
+		return err
+	}
+	return writeJSONFile(a.lockPathFor(id), lock)
 }
 
 func (a *app) ensureLockfile(p *profile) error {
@@ -2272,11 +3981,16 @@ func upsertInstall(items []lockedInstall, item lockedInstall) []lockedInstall {
 }
 
 func (a *app) saveUploadedJar(p *profile, file multipart.File, header *multipart.FileHeader) (jarDetection, lockedInstall, error) {
+	return a.saveUploadedJarFor(a.activeServerIDValue(), p, file, header)
+}
+
+func (a *app) saveUploadedJarFor(serverID string, p *profile, file multipart.File, header *multipart.FileHeader) (jarDetection, lockedInstall, error) {
 	name := filepath.Base(header.Filename)
 	if !strings.HasSuffix(strings.ToLower(name), ".jar") {
 		return jarDetection{}, lockedInstall{}, errors.New("only .jar uploads are supported")
 	}
-	tmp, err := os.CreateTemp(a.paths().ServerMain, "upload-*.jar")
+	serverDir := a.serverDir(serverID)
+	tmp, err := os.CreateTemp(serverDir, "upload-*.jar")
 	if err != nil {
 		return jarDetection{}, lockedInstall{}, err
 	}
@@ -2300,7 +4014,7 @@ func (a *app) saveUploadedJar(p *profile, file multipart.File, header *multipart
 		_ = os.Remove(tmpPath)
 		return detection, lockedInstall{}, errors.New("uploaded jar is incompatible with this server profile")
 	}
-	targetDir := filepath.Join(a.paths().ServerMain, detection.TargetFolder)
+	targetDir := filepath.Join(serverDir, detection.TargetFolder)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		_ = os.Remove(tmpPath)
 		return jarDetection{}, lockedInstall{}, err
@@ -2356,11 +4070,19 @@ func detectJar(path, name string, p *profile) (jarDetection, error) {
 	case entries["quilt.mod.json"]:
 		detection.DetectedType = "Quilt mod"
 		detection.TargetFolder = "mods"
-		detection.Compatibility = "incompatible"
+		if p.Loader == "quilt" {
+			detection.Compatibility = "compatible"
+		} else {
+			detection.Compatibility = "incompatible"
+		}
 	case entries["META-INF/mods.toml"]:
 		detection.DetectedType = "Forge/NeoForge mod"
 		detection.TargetFolder = "mods"
-		detection.Compatibility = "incompatible"
+		if p.Loader == "forge" || p.Loader == "neoforge" {
+			detection.Compatibility = "compatible"
+		} else {
+			detection.Compatibility = "incompatible"
+		}
 	default:
 		detection.DetectedType = "Unknown jar"
 		detection.TargetFolder = "plugins"
@@ -2370,16 +4092,23 @@ func detectJar(path, name string, p *profile) (jarDetection, error) {
 }
 
 func (a *app) createBackup(reason string) (backupInfo, error) {
+	return a.createBackupFor(a.activeServerIDValue(), reason)
+}
+
+func (a *app) createBackupFor(serverID, reason string) (backupInfo, error) {
+	a.backupMu.Lock()
+	defer a.backupMu.Unlock()
 	if reason == "" {
 		reason = "manual"
 	}
-	serverName := a.activeServerIDValue()
-	if p, err := a.loadProfile(); err == nil && strings.TrimSpace(p.Name) != "" {
+	serverID = normalizeServerID(serverID)
+	serverName := serverID
+	if p, err := a.loadProfileFor(serverID); err == nil && strings.TrimSpace(p.Name) != "" {
 		serverName = p.Name
 	}
 	id := safeName(serverName) + "-" + time.Now().UTC().Format("2006-01-02-150405") + "-" + safeName(reason)
 	path := filepath.Join(a.paths().Backups, id+".zip")
-	if err := zipDirectory(a.paths().ServerMain, path, map[string]bool{
+	if err := zipDirectory(a.serverDir(serverID), path, map[string]bool{
 		"server.jar": true,
 		"cache":      true,
 		"libraries":  true,
@@ -2392,7 +4121,20 @@ func (a *app) createBackup(reason string) (backupInfo, error) {
 	if err != nil {
 		return backupInfo{}, err
 	}
-	return backupInfo{ID: id, Path: path, SizeBytes: info.Size(), CreatedAt: info.ModTime()}, nil
+	meta, _ := a.loadBackupMeta()
+	created := info.ModTime()
+	meta.Backups[id] = backupMetaItem{
+		Automatic: reason == "auto",
+		ServerID:  serverID,
+		Reason:    reason,
+		CreatedAt: &created,
+	}
+	_ = a.saveBackupMeta(meta)
+	result := backupInfo{ID: id, Path: path, SizeBytes: info.Size(), CreatedAt: created, Automatic: reason == "auto", Meta: meta.Backups[id]}
+	if reason == "auto" {
+		_ = a.pruneAutoBackups(serverID)
+	}
+	return result, nil
 }
 
 func (a *app) importBackup(file multipart.File, header *multipart.FileHeader) (backupInfo, error) {
@@ -2435,7 +4177,16 @@ func (a *app) importBackup(file multipart.File, header *multipart.FileHeader) (b
 	if err != nil {
 		return backupInfo{}, err
 	}
-	return backupInfo{ID: id, Path: path, SizeBytes: info.Size(), CreatedAt: info.ModTime()}, nil
+	meta, _ := a.loadBackupMeta()
+	created := info.ModTime()
+	meta.Backups[id] = backupMetaItem{
+		Automatic: false,
+		ServerID:  a.activeServerIDValue(),
+		Reason:    "uploaded",
+		CreatedAt: &created,
+	}
+	_ = a.saveBackupMeta(meta)
+	return backupInfo{ID: id, Path: path, SizeBytes: info.Size(), CreatedAt: created, Meta: meta.Backups[id]}, nil
 }
 
 func (a *app) listBackups() ([]backupInfo, error) {
@@ -2443,6 +4194,7 @@ func (a *app) listBackups() ([]backupInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	meta, _ := a.loadBackupMeta()
 	backups := make([]backupInfo, 0)
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".zip") {
@@ -2453,15 +4205,101 @@ func (a *app) listBackups() ([]backupInfo, error) {
 			continue
 		}
 		id := strings.TrimSuffix(entry.Name(), ".zip")
+		item := meta.Backups[id]
+		if item.Reason == "" {
+			item.Reason = backupReasonFromID(id)
+		}
+		if item.Automatic == false && item.Reason == "auto" {
+			item.Automatic = true
+		}
 		backups = append(backups, backupInfo{
 			ID:        id,
 			Path:      filepath.Join(a.paths().Backups, entry.Name()),
 			SizeBytes: info.Size(),
 			CreatedAt: info.ModTime(),
+			Locked:    item.Locked,
+			Automatic: item.Automatic,
+			Meta:      item,
 		})
 	}
 	sort.Slice(backups, func(i, j int) bool { return backups[i].CreatedAt.After(backups[j].CreatedAt) })
 	return backups, nil
+}
+
+func (a *app) backupMetaPath() string {
+	return filepath.Join(a.paths().Backups, ".minemux-backups.json")
+}
+
+func (a *app) loadBackupMeta() (backupMetaStore, error) {
+	store := backupMetaStore{Backups: map[string]backupMetaItem{}}
+	if err := readJSONFile(a.backupMetaPath(), &store); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return store, nil
+		}
+		return store, err
+	}
+	if store.Backups == nil {
+		store.Backups = map[string]backupMetaItem{}
+	}
+	return store, nil
+}
+
+func (a *app) saveBackupMeta(store backupMetaStore) error {
+	if store.Backups == nil {
+		store.Backups = map[string]backupMetaItem{}
+	}
+	return writeJSONFile(a.backupMetaPath(), store)
+}
+
+func (a *app) removeBackupMeta(id string) error {
+	store, err := a.loadBackupMeta()
+	if err != nil {
+		return err
+	}
+	delete(store.Backups, id)
+	return a.saveBackupMeta(store)
+}
+
+func backupReasonFromID(id string) string {
+	parts := strings.Split(id, "-")
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[len(parts)-1]
+}
+
+func (a *app) pruneAutoBackups(serverID string) error {
+	p, err := a.loadProfile()
+	if err != nil || p == nil {
+		return err
+	}
+	normalizeBackupPolicy(p)
+	keep := p.Backups.KeepAutoBackups
+	backups, err := a.listBackups()
+	if err != nil {
+		return err
+	}
+	auto := make([]backupInfo, 0)
+	for _, backup := range backups {
+		if backup.Locked || !backup.Automatic {
+			continue
+		}
+		if backup.Meta.ServerID != "" && serverID != "" && backup.Meta.ServerID != serverID {
+			continue
+		}
+		auto = append(auto, backup)
+	}
+	sort.Slice(auto, func(i, j int) bool { return auto[i].CreatedAt.After(auto[j].CreatedAt) })
+	for i := keep; i < len(auto); i++ {
+		id := auto[i].ID
+		if err := os.Remove(filepath.Join(a.paths().Backups, id+".zip")); err == nil {
+			_ = a.removeBackupMeta(id)
+			a.server.mu.Lock()
+			a.server.appendLogLocked("Pruned scheduled backup: " + id)
+			a.server.mu.Unlock()
+		}
+	}
+	return nil
 }
 
 func (a *app) restoreBackup(id string) error {
@@ -2540,6 +4378,20 @@ func writeServerProperties(dir string, p *profile) error {
 		"allow-flight":              "false",
 		"prevent-proxy-connections": "false",
 	}
+	for key, value := range p.Properties {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		props[key] = strings.TrimSpace(value)
+	}
+	if strings.TrimSpace(p.Seed) != "" {
+		props["level-seed"] = strings.TrimSpace(p.Seed)
+	}
+	props["server-port"] = strconv.Itoa(p.Ports.JavaTCP)
+	props["max-players"] = strconv.Itoa(p.MaxPlayers)
+	props["view-distance"] = strconv.Itoa(p.ViewDistance)
+	props["simulation-distance"] = strconv.Itoa(p.SimulationDistance)
 	keys := make([]string, 0, len(props))
 	for key := range props {
 		keys = append(keys, key)
@@ -2595,6 +4447,10 @@ func detectJavaMajor() int {
 }
 
 func ensureJavaInstalled() error {
+	return ensureJavaInstalledWithLog(nil)
+}
+
+func ensureJavaInstalledWithLog(logLine func(string)) error {
 	if detectJavaMajor() > 0 {
 		return nil
 	}
@@ -2608,11 +4464,22 @@ func ensureJavaInstalled() error {
 	for _, packageName := range []string{"openjdk-25", "openjdk-21"} {
 		cmd := exec.Command("pkg", "install", "-y", packageName)
 		cmd.Env = cleanJavaEnv(os.Environ())
-		out, err := cmd.CombinedOutput()
+		var captured strings.Builder
+		logger := func(line string) {
+			captured.WriteString(line)
+			captured.WriteString("\n")
+			if logLine != nil {
+				logLine(line)
+			}
+		}
+		if logLine != nil {
+			logLine("Running pkg install -y " + packageName)
+		}
+		err := runCommandStreaming(cmd, logger)
 		if err == nil && detectJavaMajor() > 0 {
 			return nil
 		}
-		detail := strings.TrimSpace(string(out))
+		detail := strings.TrimSpace(captured.String())
 		log.Printf("install %s failed: %v %s", packageName, err, detail)
 		if detail != "" {
 			installErrors = append(installErrors, packageName+": "+lastLines(detail, 8))
@@ -2624,6 +4491,37 @@ func ensureJavaInstalled() error {
 		return fmt.Errorf("could not install OpenJDK. MineMux refreshed DNS, but pkg still failed. Last output: %s", strings.Join(installErrors, " | "))
 	}
 	return errors.New("could not install OpenJDK; check network access or run in Terminal: pkg install openjdk-25")
+}
+
+func runCommandStreaming(cmd *exec.Cmd, logLine func(string)) error {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	var wg sync.WaitGroup
+	scan := func(stream io.Reader) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stream)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" && logLine != nil {
+				logLine(line)
+			}
+		}
+	}
+	wg.Add(2)
+	go scan(stdout)
+	go scan(stderr)
+	waitErr := cmd.Wait()
+	wg.Wait()
+	return waitErr
 }
 
 func ensureTermuxDNSConfigured() error {
@@ -3231,6 +5129,41 @@ func minInt(a, b int) int {
 	return b
 }
 
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func systemMemoryMB() int {
+	status := memoryStatusFromProc()
+	if status.TotalBytes <= 0 {
+		return 8192
+	}
+	return int(status.TotalBytes / 1024 / 1024)
+}
+
+func copyFile(source, target string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	out, err := os.Create(target)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 func clampInt(value, min, max int) int {
 	if value < min {
 		return min
@@ -3239,6 +5172,16 @@ func clampInt(value, min, max int) int {
 		return max
 	}
 	return value
+}
+
+func enumString(value, fallback string, allowed []string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, option := range allowed {
+		if normalized == option {
+			return normalized
+		}
+	}
+	return fallback
 }
 
 func getenv(key, fallback string) string {
