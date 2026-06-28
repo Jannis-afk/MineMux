@@ -27,6 +27,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.ArrayAdapter;
+import android.widget.AdapterView;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -195,7 +196,6 @@ public class MineMuxActivity extends Activity {
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         setContentView(buildContent());
         startMineMuxDaemon();
-        maybeRequestBatteryOptimizationExemption();
     }
 
     @Override
@@ -325,9 +325,9 @@ public class MineMuxActivity extends Activity {
         content = root;
 
         LinearLayout tabs = bottomNav();
-        dashboardTab = tabButton("\u2302", "dashboard");
-        serversTab = tabButton("\u25A4", "servers");
-        settingsTab = tabButton("\u2699", "settings");
+        dashboardTab = tabButton("Dashboard", "dashboard");
+        serversTab = tabButton("Servers", "servers");
+        settingsTab = tabButton("Settings", "settings");
         tabs.addView(dashboardTab, weightedTabParams());
         tabs.addView(serversTab, weightedTabParams());
         tabs.addView(settingsTab, weightedTabParams());
@@ -460,6 +460,7 @@ public class MineMuxActivity extends Activity {
                 empty.addView(setup, fullWidthButtonParams());
             } else {
                 content.addView(dashboardServerCard(), matchWrapMargin(0, dp(12), 0, dp(12)));
+                addDashboardQuickTools();
             }
             buildRecentActivitySection();
             return;
@@ -638,6 +639,38 @@ public class MineMuxActivity extends Activity {
         return live;
     }
 
+    private void addDashboardQuickTools() {
+        LinearLayout tools = sectionCard("Quick Tools", "", null);
+        content.addView(tools, matchWrapMargin(0, 0, 0, dp(12)));
+        TextView hint = text("Fast access to the tools that are easier in the full Web UI.", 13, MUTED, false);
+        hint.setPadding(0, dp(6), 0, dp(10));
+        tools.addView(hint);
+
+        LinearLayout rowA = row();
+        tools.addView(rowA, matchWrap());
+        Button updates = primaryButton("Updates");
+        updates.setOnClickListener(v -> openWebPage("updates"));
+        rowA.addView(updates, weightedButtonParams());
+        Button world = secondaryButton("World Map");
+        world.setOnClickListener(v -> openWebPage("world"));
+        rowA.addView(world, weightedButtonParams());
+        Button mods = secondaryButton("Mods");
+        mods.setOnClickListener(v -> openWebPage("mods"));
+        rowA.addView(mods, weightedButtonParams());
+
+        LinearLayout rowB = row();
+        tools.addView(rowB, matchWrap());
+        Button files = secondaryButton("Files");
+        files.setOnClickListener(v -> openServerFiles());
+        rowB.addView(files, weightedButtonParams());
+        Button backups = secondaryButton("Backups");
+        backups.setOnClickListener(v -> setPage("backups"));
+        rowB.addView(backups, weightedButtonParams());
+        Button web = secondaryButton("Web UI");
+        web.setOnClickListener(v -> openWebPage(""));
+        rowB.addView(web, weightedButtonParams());
+    }
+
     private void addDashboardPlayItLines(LinearLayout parent) {
         JSONObject playit = playItStatus();
         if (!hasPlayItOutput(playit)) return;
@@ -649,7 +682,7 @@ public class MineMuxActivity extends Activity {
         } else if (!error.isEmpty()) {
             parent.addView(text("PlayIt: " + error, 14, DANGER_RED, true));
         } else if (!claim.isEmpty()) {
-            parent.addView(text("PlayIt setup: claim link ready", 15, GREEN, true));
+            parent.addView(playItClaimLine("PlayIt setup", claim));
         }
     }
 
@@ -664,8 +697,16 @@ public class MineMuxActivity extends Activity {
         } else if (!error.isEmpty()) {
             parent.addView(text("PlayIt: " + error, 14, DANGER_RED, true));
         } else if (!claim.isEmpty()) {
-            parent.addView(text("PlayIt setup pending", 15, GREEN, true));
+            parent.addView(playItClaimLine("PlayIt setup", claim));
         }
+    }
+
+    private TextView playItClaimLine(String label, String claim) {
+        TextView link = text(label + ": " + claim, 15, GREEN, true);
+        link.setPaintFlags(link.getPaintFlags() | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
+        link.setClickable(true);
+        link.setOnClickListener(v -> openUrl(claim));
+        return link;
     }
 
     private void addPlayItCard(LinearLayout parent, JSONObject playit, boolean compact) {
@@ -686,7 +727,7 @@ public class MineMuxActivity extends Activity {
             actions.addView(copy, weightedButtonParams());
         } else if (!error.isEmpty()) {
             card.addView(text(error, 13, DANGER_RED, true));
-            card.addView(text("Set the PlayIt agent/tunnel to IPv4 only in PlayIt first. If the plugin still fails, start the fallback agent here.", 12, MUTED, false));
+            card.addView(text("Set the PlayIt tunnel to IPv4 only in PlayIt, then restart the agent.", 12, MUTED, false));
             if (!claim.isEmpty()) {
                 card.addView(summaryLine("Claim Link", claim));
                 LinearLayout actions = row();
@@ -701,12 +742,12 @@ public class MineMuxActivity extends Activity {
             LinearLayout fallbackActions = row();
             card.addView(fallbackActions, matchWrapMargin(0, dp(8), 0, 0));
             if (playit.optBoolean("running", false)) {
-                Button stopFallback = secondaryButton("Stop Fallback");
-                stopFallback.setOnClickListener(v -> actionButton(stopFallback, "/api/playit/agent/stop", "{}", "Stopping PlayIt fallback..."));
+                Button stopFallback = secondaryButton("Stop Agent");
+                stopFallback.setOnClickListener(v -> actionButton(stopFallback, "/api/playit/agent/stop", "{}", "Stopping PlayIt agent..."));
                 fallbackActions.addView(stopFallback, weightedButtonParams());
             } else {
-                Button startFallback = secondaryButton("Start Fallback");
-                startFallback.setOnClickListener(v -> actionButton(startFallback, "/api/playit/agent/start", "{}", "Starting PlayIt fallback..."));
+                Button startFallback = secondaryButton("Start Agent");
+                startFallback.setOnClickListener(v -> actionButton(startFallback, "/api/playit/agent/start", "{}", "Starting PlayIt agent..."));
                 fallbackActions.addView(startFallback, weightedButtonParams());
             }
         } else if (!claim.isEmpty()) {
@@ -720,6 +761,20 @@ public class MineMuxActivity extends Activity {
             Button copy = secondaryButton("Copy");
             copy.setOnClickListener(v -> copyToClipboard("PlayIt claim", claim));
             actions.addView(copy, weightedButtonParams());
+        } else if (playit.optBoolean("enabled", false) || playit.optBoolean("running", false)) {
+            card.addView(summaryLine("Mode", playit.optString("mode", "standalone-agent")));
+            card.addView(text(playit.optBoolean("running", false) ? "PlayIt agent is running." : "PlayIt is enabled for this server.", 13, MUTED, false));
+            LinearLayout actions = row();
+            card.addView(actions, matchWrapMargin(0, dp(8), 0, 0));
+            if (playit.optBoolean("running", false)) {
+                Button stop = secondaryButton("Stop Agent");
+                stop.setOnClickListener(v -> actionButton(stop, "/api/playit/agent/stop", "{}", "Stopping PlayIt agent..."));
+                actions.addView(stop, weightedButtonParams());
+            } else {
+                Button start = primaryButton("Start Agent");
+                start.setOnClickListener(v -> actionButton(start, "/api/playit/agent/start", "{}", "Starting PlayIt agent..."));
+                actions.addView(start, weightedButtonParams());
+            }
         }
     }
 
@@ -962,11 +1017,24 @@ public class MineMuxActivity extends Activity {
     private void buildSetupVersionStep(LinearLayout panel) {
         panel.addView(text("Choose Minecraft", 19, TEXT, true));
         panel.addView(text("Choose the runtime MineMux should install. Paper is best for plugins, Vanilla is simplest, and Fabric, Quilt, Forge, and NeoForge are for modded servers.", 13, MUTED, false));
-        Spinner versionSpinner = spinner(new String[]{wizardVersion, "latest-compatible", "1.21.8", "1.21.7", "1.21.6", "1.21.5", "1.21.4", "1.20.6", "1.20.4"});
+        Spinner versionSpinner = spinner(new String[]{wizardVersion, "latest-compatible", "26.2", "26.1.2", "1.21.8", "1.21.7", "1.21.6", "1.21.5", "1.21.4", "1.20.6", "1.20.4"});
         addField(panel, "Minecraft version", versionSpinner);
         Spinner loaderSpinner = spinner(new String[]{"paper - Paper Plugins", "vanilla - Vanilla", "fabric - Fabric Mods", "quilt - Quilt Mods", "forge - Forge Mods", "neoforge - NeoForge Mods"});
+        selectSpinnerValue(loaderSpinner, wizardLoader);
         addField(panel, "Runtime", loaderSpinner);
         loadSetupOptions(versionSpinner, loaderSpinner);
+        loaderSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            private String lastLoader = wizardLoader;
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String nextLoader = loaderId(String.valueOf(parent.getItemAtPosition(position)));
+                if (nextLoader.equals(lastLoader)) return;
+                lastLoader = nextLoader;
+                wizardLoader = nextLoader;
+                wizardVersion = "latest-compatible";
+                loadSetupVersions(versionSpinner, nextLoader);
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
         setupNav(panel, () -> {
             setupStep = 0;
             setPage("setup");
@@ -974,7 +1042,6 @@ public class MineMuxActivity extends Activity {
             String loaderChoice = loaderSpinner.getSelectedItem().toString();
             wizardVersion = versionSpinner.getSelectedItem().toString();
             wizardLoader = loaderId(loaderChoice);
-            if (!"paper".equals(wizardLoader)) wizardPlayitEnabled = false;
             setupStep = 2;
             setPage("setup");
         }, "Next");
@@ -1097,21 +1164,9 @@ public class MineMuxActivity extends Activity {
 
     private void buildSetupPlayitStep(LinearLayout panel) {
         panel.addView(text("PlayIt.gg", 19, TEXT, true));
-        if (!"paper".equals(wizardLoader)) {
-            wizardPlayitEnabled = false;
-            panel.addView(text("PlayIt plugin setup is currently offered for Paper/Spigot-style servers. Other runtimes can still use the standalone PlayIt agent later as fallback.", 13, MUTED, false));
-            setupNav(panel, () -> {
-                setupStep = 6;
-                setPage("setup");
-            }, () -> {
-                setupStep = 8;
-                setPage("setup");
-            }, "Review");
-            return;
-        }
-        panel.addView(text("MineMux installs the official PlayIt plugin jar. If PlayIt throws IPv6/control-channel errors on Android, set the PlayIt agent/tunnel to IPv4 only in PlayIt. The standalone agent remains available as fallback.", 13, MUTED, false));
+        panel.addView(text("Paper uses the PlayIt plugin. Vanilla, Fabric, Quilt, Forge, and NeoForge use the standalone PlayIt agent.", 13, MUTED, false));
         CheckBox playit = new CheckBox(this);
-        playit.setText("Install PlayIt plugin");
+        playit.setText("Enable PlayIt tunnel");
         playit.setTextColor(TEXT);
         playit.setTextSize(15);
         playit.setChecked(wizardPlayitEnabled);
@@ -1138,7 +1193,7 @@ public class MineMuxActivity extends Activity {
         panel.addView(summaryLine("JAR", "custom".equals(wizardJarMode) ? wizardCustomJarName : "Automatic download"));
         panel.addView(summaryLine("Add-ons", wizardPendingMods.isEmpty() ? "None" : String.valueOf(wizardPendingMods.size())));
         panel.addView(summaryLine("Crossplay", wizardCrossplayEnabled ? "Geyser" + (wizardFloodgateEnabled ? " + Floodgate" : "") : "Off"));
-        panel.addView(summaryLine("PlayIt.gg", wizardPlayitEnabled && "paper".equals(wizardLoader) ? "Install plugin" : "Off"));
+        panel.addView(summaryLine("PlayIt.gg", wizardPlayitEnabled ? ("paper".equals(wizardLoader) ? "Plugin + agent option" : "Standalone agent") : "Off"));
         CheckBox eula = new CheckBox(this);
         eula.setText("I accept the Minecraft EULA");
         eula.setTextColor(TEXT);
@@ -1173,7 +1228,7 @@ public class MineMuxActivity extends Activity {
                 + ",\"installFloodgate\":" + wizardFloodgateEnabled
                 + ",\"floodgate\":" + wizardFloodgateEnabled
                 + ",\"bedrockUdp\":19132},"
-                + "\"playit\":{\"enabled\":" + (wizardPlayitEnabled && "paper".equals(wizardLoader)) + "},"
+                + "\"playit\":{\"enabled\":" + wizardPlayitEnabled + "},"
                 + "\"acceptEula\":" + (wizardEula || eulaAlreadyAccepted())
                 + "}";
             beginSetupProgress();
@@ -1246,19 +1301,11 @@ public class MineMuxActivity extends Activity {
     }
 
     private void loadSetupOptions(Spinner versionSpinner, Spinner loaderSpinner) {
-        getJson("/api/server/options", body -> {
+        getJson("/api/server/options?loader=" + urlEncode(wizardLoader), body -> {
             try {
                 JSONObject root = new JSONObject(body);
                 JSONArray versions = root.optJSONArray("minecraftVersions");
-                if (versions != null && versions.length() > 0) {
-                    List<String> items = new ArrayList<>();
-                    items.add("latest-compatible");
-                    for (int i = 0; i < versions.length(); i++) {
-                        String id = versions.getJSONObject(i).optString("id");
-                        if (!id.isEmpty() && !items.contains(id)) items.add(id);
-                    }
-                    setSpinnerItems(versionSpinner, items);
-                }
+                setMinecraftVersionItems(versionSpinner, versions, wizardVersion);
                 JSONArray loaders = root.optJSONArray("loaders");
                 if (loaders != null && loaders.length() > 0) {
                     List<String> items = new ArrayList<>();
@@ -1270,9 +1317,31 @@ public class MineMuxActivity extends Activity {
                         items.add(id + " - " + name + (supported ? "" : " - coming soon"));
                     }
                     setSpinnerItems(loaderSpinner, items);
+                    selectSpinnerValue(loaderSpinner, wizardLoader);
                 }
             } catch (Exception ignored) {}
         }, error -> {});
+    }
+
+    private void loadSetupVersions(Spinner versionSpinner, String loader) {
+        getJson("/api/catalog/minecraft-versions?loader=" + urlEncode(loader), body -> {
+            try {
+                JSONObject root = new JSONObject(body);
+                setMinecraftVersionItems(versionSpinner, root.optJSONArray("versions"), wizardVersion);
+            } catch (Exception ignored) {}
+        }, error -> {});
+    }
+
+    private void setMinecraftVersionItems(Spinner versionSpinner, @Nullable JSONArray versions, String selected) {
+        if (versions == null || versions.length() == 0) return;
+        List<String> items = new ArrayList<>();
+        items.add("latest-compatible");
+        for (int i = 0; i < versions.length(); i++) {
+            String id = versions.optJSONObject(i) == null ? "" : versions.optJSONObject(i).optString("id");
+            if (!id.isEmpty() && !items.contains(id)) items.add(id);
+        }
+        setSpinnerItems(versionSpinner, items);
+        selectSpinnerValue(versionSpinner, selected == null || selected.isEmpty() ? "latest-compatible" : selected);
     }
 
     private interface IntValueConsumer {
@@ -1319,7 +1388,7 @@ public class MineMuxActivity extends Activity {
 
     private int[] ramSliderOptions() {
         int max = Math.max(1024, totalMemoryMb() * 80 / 100);
-        int[] base = new int[]{1024, 1536, 2048, 2560, 3072, 4096, 5120, 6144, 8192, 10240, 12288, 16384};
+        int[] base = new int[]{1024, 1536, 2048, 2560, 3072, 4096, 5120, 6144, 8192};
         ArrayList<Integer> values = new ArrayList<>();
         for (int option : base) {
             if (option <= max) values.add(option);
@@ -1645,6 +1714,20 @@ public class MineMuxActivity extends Activity {
             Button backups = secondaryButton("Backups");
             backups.setOnClickListener(v -> setPage("backups"));
             actionsB.addView(backups, weightedButtonParams());
+            Button updates = secondaryButton("Updates");
+            updates.setOnClickListener(v -> openWebPage("updates"));
+            actionsB.addView(updates, weightedButtonParams());
+            LinearLayout actionsC = row();
+            actions.addView(actionsC, matchWrap());
+            Button world = secondaryButton("World Map");
+            world.setOnClickListener(v -> openWebPage("world"));
+            actionsC.addView(world, weightedButtonParams());
+            Button files = secondaryButton("Files");
+            files.setOnClickListener(v -> openServerFiles());
+            actionsC.addView(files, weightedButtonParams());
+            Button web = secondaryButton("Web UI");
+            web.setOnClickListener(v -> openWebPage(""));
+            actionsC.addView(web, weightedButtonParams());
         }
 
         addServerPropertiesSection(parent, server, profile, active);
@@ -1663,6 +1746,21 @@ public class MineMuxActivity extends Activity {
         Button delete = dangerButton("Delete Server + Backups");
         delete.setOnClickListener(v -> deleteServer(server));
         danger.addView(delete, fullWidthButtonParams());
+    }
+
+    private void openWebPage(String page) {
+        Intent intent = new Intent(this, MineMuxWebActivity.class);
+        intent.putExtra("page", page);
+        startActivity(intent);
+    }
+
+    private void openServerFiles() {
+        if (!activeServerInstalled()) {
+            setNotice("Create a server before opening files.", true);
+            return;
+        }
+        fileBrowserPath = "";
+        setPage("server-files");
     }
 
     private void addServerPropertiesSection(LinearLayout parent, @Nullable JSONObject profile) {
@@ -2332,8 +2430,12 @@ public class MineMuxActivity extends Activity {
         content.addView(sectionTitle("Advanced Tools"));
         LinearLayout tools = sectionCard("", "", null);
         content.addView(tools, matchWrapMargin(0, 0, 0, dp(16)));
+        tools.addView(settingRowIcon("U", "Updates", "Update Minecraft, runtimes, and compatible mods", ACCENT, () -> openWebPage("updates")));
+        tools.addView(settingRowIcon("M", "World Map", "Open the top-down world viewer", GREEN, () -> openWebPage("world")));
+        tools.addView(settingRowIcon("P", "Mod Manager", "Search, install, remove, and roll back add-ons", PURPLE, () -> openWebPage("mods")));
+        tools.addView(settingRowIcon("F", "File Browser", "Browse and edit active server files", WARNING, this::openServerFiles));
         tools.addView(settingRowIcon("T", "Terminal", "Open shell recovery", GREEN, () -> startActivity(new Intent(this, TermuxActivity.class))));
-        tools.addView(settingRowIcon("W", "Web UI", "Open advanced browser console", MUTED, () -> startActivity(new Intent(this, MineMuxWebActivity.class))));
+        tools.addView(settingRowIcon("W", "Web UI", "Open the full MineMux control panel", MUTED, () -> openWebPage("")));
 
         TextView footer = text("App Version " + appVersionText(), 11, TERTIARY, false);
         footer.setGravity(Gravity.CENTER);
@@ -2519,7 +2621,7 @@ public class MineMuxActivity extends Activity {
         row.addView(text(id, 14, TEXT, true));
         row.addView(text(bytes(backup.optLong("sizeBytes", 0)), 12, MUTED, false));
         Button restore = secondaryButton("Restore");
-        restore.setOnClickListener(v -> actionButton(restore, "/api/backups/restore?id=" + urlEncode(id), "{}", "Restoring backup..."));
+        restore.setOnClickListener(v -> confirmRestoreBackup(restore, id));
         row.addView(restore, fullWidthButtonParams());
         LinearLayout actions = row();
         row.addView(actions, matchWrapMargin(0, dp(6), 0, 0));
@@ -2527,9 +2629,7 @@ public class MineMuxActivity extends Activity {
         download.setOnClickListener(v -> downloadBackup(id));
         actions.addView(download, weightedButtonParams());
         Button delete = secondaryButton("Delete");
-        delete.setOnClickListener(v -> deleteJson("/api/backups/" + urlEncode(id), "Deleting backup...", () -> {
-            if ("backups".equals(currentPage)) setPage("backups");
-        }));
+        delete.setOnClickListener(v -> confirmDeleteBackup(id));
         actions.addView(delete, weightedButtonParams());
         return row;
     }
@@ -2581,10 +2681,9 @@ public class MineMuxActivity extends Activity {
                 if (runningNow && readyNow) startingServer = false;
                 if (!runningNow || !stoppingNow) stoppingServer = false;
                 sampleDashboardHistory(server);
-                updateServerWakeLock(runningNow || startingNow || stoppingNow || startingServer || stoppingServer);
-                if (runningNow || startingNow || stoppingNow || startingServer || stoppingServer) {
-                    MineMuxRuntime.acquireServiceWakeLock(this);
-                }
+                boolean keepServerAwake = runningNow || startingNow || stoppingNow || startingServer || stoppingServer;
+                updateServerWakeLock(keepServerAwake);
+                updateServiceWakeLock(keepServerAwake);
                 updateDashboardLiveViews();
                 if ("dashboard".equals(currentPage)
                     && (lastDashboardInstalled == null || lastDashboardInstalled != installedNow || lastDashboardRunning == null || lastDashboardRunning != runningNow)) {
@@ -2676,6 +2775,11 @@ public class MineMuxActivity extends Activity {
     private void updateServerWakeLock(boolean running) {
         if (running) acquireServerWakeLock();
         else releaseServerWakeLock();
+    }
+
+    private void updateServiceWakeLock(boolean running) {
+        if (running) MineMuxRuntime.acquireServiceWakeLock(this);
+        else MineMuxRuntime.releaseServiceWakeLock(this);
     }
 
     private void acquireServerWakeLock() {
@@ -2923,15 +3027,51 @@ public class MineMuxActivity extends Activity {
                     setNotice("Done", false);
                     refreshStatus();
                     if ("backups".equals(currentPage) || "mods".equals(currentPage)) setPage(currentPage);
+                    if ("server-detail".equals(currentPage)) refreshSelectedServerDetail(true);
                     done.run();
                 });
             } catch (Exception e) {
                 mainHandler.post(() -> {
+                    clearOptimisticServerState(path);
                     setNotice(e.getMessage(), true);
                     done.run();
                 });
             }
         }).start();
+    }
+
+    private void clearOptimisticServerState(String path) {
+        if (path == null) return;
+        if (path.contains("/api/server/start") || path.contains("/api/server/restart")) {
+            startingServer = false;
+        }
+        if (path.contains("/api/server/stop") || path.contains("/api/server/restart")) {
+            stoppingServer = false;
+        }
+        if (!activeServerRunning()) {
+            releaseServerWakeLock();
+            MineMuxRuntime.releaseServiceWakeLock(this);
+        }
+    }
+
+    private void refreshSelectedServerDetail(boolean rerender) {
+        if (selectedServerDetail == null) return;
+        String selectedId = selectedServerDetail.optString("id", "");
+        if (selectedId.isEmpty()) return;
+        getJson("/api/servers", body -> {
+            try {
+                JSONArray servers = new JSONObject(body).optJSONArray("servers");
+                if (servers == null) return;
+                for (int i = 0; i < servers.length(); i++) {
+                    JSONObject server = servers.getJSONObject(i);
+                    if (selectedId.equals(server.optString("id", ""))) {
+                        selectedServerDetail = server;
+                        if (rerender && "server-detail".equals(currentPage)) setPage("server-detail");
+                        return;
+                    }
+                }
+            } catch (Exception ignored) {}
+        }, error -> {});
     }
 
     private void deleteJson(String path, String progress, Runnable done) {
@@ -2978,6 +3118,27 @@ public class MineMuxActivity extends Activity {
             .setPositiveButton("Delete", (dialog, which) -> deleteJson("/api/servers/" + urlEncode(id), "Deleting server and backups...", () -> {
                 selectedServerDetail = null;
                 setPage("servers");
+            }))
+            .show();
+    }
+
+    private void confirmRestoreBackup(Button button, String id) {
+        new AlertDialog.Builder(this)
+            .setTitle("Restore backup?")
+            .setMessage("This replaces the active server world and files with backup " + id + ".")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Restore", (dialog, which) ->
+                actionButton(button, "/api/backups/restore?id=" + urlEncode(id), "{}", "Restoring backup..."))
+            .show();
+    }
+
+    private void confirmDeleteBackup(String id) {
+        new AlertDialog.Builder(this)
+            .setTitle("Delete backup?")
+            .setMessage("Backup " + id + " will be removed permanently.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete", (dialog, which) -> deleteJson("/api/backups/" + urlEncode(id), "Deleting backup...", () -> {
+                if ("backups".equals(currentPage)) setPage("backups");
             }))
             .show();
     }
@@ -3057,6 +3218,7 @@ public class MineMuxActivity extends Activity {
                 connection.setReadTimeout(600000);
                 connection.setRequestMethod("POST");
                 connection.setDoOutput(true);
+                connection.setChunkedStreamingMode(64 * 1024);
                 connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
                 try (OutputStream out = connection.getOutputStream(); InputStream in = getContentResolver().openInputStream(uri)) {
                     if (in == null) throw new Exception("Could not open selected file");
@@ -3141,6 +3303,7 @@ public class MineMuxActivity extends Activity {
         connection.setReadTimeout(600000);
         connection.setRequestMethod("POST");
         connection.setDoOutput(true);
+        connection.setChunkedStreamingMode(64 * 1024);
         connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
         try (OutputStream out = connection.getOutputStream(); InputStream in = getContentResolver().openInputStream(uri)) {
             if (in == null) throw new Exception("Could not open selected file");
@@ -3190,6 +3353,7 @@ public class MineMuxActivity extends Activity {
                 connection.setReadTimeout(600000);
                 connection.setRequestMethod("POST");
                 connection.setDoOutput(true);
+                connection.setChunkedStreamingMode(64 * 1024);
                 connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
                 try (OutputStream out = connection.getOutputStream(); InputStream in = getContentResolver().openInputStream(uri)) {
                     if (in == null) throw new Exception("Could not open selected backup");
@@ -3403,7 +3567,9 @@ public class MineMuxActivity extends Activity {
 
     private boolean hasPlayItOutput(JSONObject playit) {
         if (playit == null) return false;
-        return !playit.optString("claimUrl", "").isEmpty()
+        return playit.optBoolean("enabled", false)
+            || playit.optBoolean("running", false)
+            || !playit.optString("claimUrl", "").isEmpty()
             || !playit.optString("address", "").isEmpty()
             || !playit.optString("error", "").isEmpty();
     }
@@ -3575,6 +3741,18 @@ public class MineMuxActivity extends Activity {
         spinner.setAdapter(adapter);
     }
 
+    private void selectSpinnerValue(Spinner spinner, String value) {
+        if (spinner == null || value == null || value.trim().isEmpty()) return;
+        String target = value.trim();
+        for (int i = 0; i < spinner.getCount(); i++) {
+            String item = String.valueOf(spinner.getItemAtPosition(i));
+            if (target.equals(item) || target.equals(loaderId(item))) {
+                spinner.setSelection(i);
+                return;
+            }
+        }
+    }
+
     private EditText input(String hint) {
         EditText edit = new EditText(this);
         edit.setText(hint);
@@ -3592,7 +3770,7 @@ public class MineMuxActivity extends Activity {
         button.setText(label);
         button.setContentDescription(screenTitle(page));
         button.setAllCaps(false);
-        button.setTextSize(36);
+        button.setTextSize(13);
         button.setGravity(Gravity.CENTER);
         button.setIncludeFontPadding(false);
         button.setPadding(0, 0, 0, 0);

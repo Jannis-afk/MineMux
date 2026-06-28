@@ -12,6 +12,17 @@ ext {
     packageVariant = System.getenv("TERMUX_PACKAGE_VARIANT") ?: "apt-android-7" // Default: "apt-android-7"
 }
 
+def minemuxLocalProperties = new Properties()
+def minemuxLocalPropertiesFile = rootProject.file("local.properties")
+if (minemuxLocalPropertiesFile.exists()) {
+    minemuxLocalPropertiesFile.withInputStream { minemuxLocalProperties.load(it) }
+}
+def minemuxReleaseStoreFile = (project.findProperty("minemuxReleaseStoreFile") ?: minemuxLocalProperties.getProperty("minemuxReleaseStoreFile"))?.toString()
+def minemuxReleaseKeyAlias = (project.findProperty("minemuxReleaseKeyAlias") ?: minemuxLocalProperties.getProperty("minemuxReleaseKeyAlias"))?.toString()
+def minemuxReleaseStorePassword = (project.findProperty("minemuxReleaseStorePassword") ?: minemuxLocalProperties.getProperty("minemuxReleaseStorePassword"))?.toString()
+def minemuxReleaseKeyPassword = (project.findProperty("minemuxReleaseKeyPassword") ?: minemuxLocalProperties.getProperty("minemuxReleaseKeyPassword"))?.toString()
+def minemuxReleaseSigningReady = minemuxReleaseStoreFile && minemuxReleaseKeyAlias && minemuxReleaseStorePassword && minemuxReleaseKeyPassword
+
 android {
     namespace "com.termux"
 
@@ -84,10 +95,21 @@ android {
             storePassword 'xrj45yWGLbsO7W0v'
             keyPassword 'xrj45yWGLbsO7W0v'
         }
+        release {
+            if (minemuxReleaseSigningReady) {
+                storeFile file(minemuxReleaseStoreFile)
+                keyAlias minemuxReleaseKeyAlias
+                storePassword minemuxReleaseStorePassword
+                keyPassword minemuxReleaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
+            if (minemuxReleaseSigningReady) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled true
             shrinkResources false // Reproducible builds
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'

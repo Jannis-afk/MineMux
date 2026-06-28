@@ -3,16 +3,21 @@ package main
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -38,13 +43,19 @@ const (
 	playItPluginURL      = "https://github.com/playit-cloud/playit-minecraft-plugin/releases/latest/download/playit-minecraft-plugin.jar"
 	playItPluginFileName = "playit-minecraft-plugin.jar"
 	playItPackageName    = "playit"
+	playItReleaseBaseURL = "https://github.com/playit-cloud/playit-agent/releases/latest/download"
+	worldMapDefaultLimit = 10000
+	worldMapMinLimit     = 1000
+	worldMapMaxLimit     = 1000000
+	worldMapDetailLimit  = 5000
 )
 
 var fallbackDNSServers = []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"}
 
 var (
-	playItClaimURLPattern = regexp.MustCompile(`https?://(?:www\.)?playit\.gg/(?:claim/[A-Za-z0-9_-]+|mc)\b[^\s<>"']*`)
-	playItTunnelPattern   = regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.gl\.(?:joinmc\.link|at\.ply\.gg)(?::[0-9]{1,5})?\b`)
+	playItClaimURLPattern     = regexp.MustCompile(`https?://(?:www\.)?playit\.gg/(?:claim/[A-Za-z0-9_-]+|mc)\b[^\s<>"']*`)
+	playItTunnelPattern       = regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.gl\.(?:joinmc\.link|at\.ply\.gg)(?::[0-9]{1,5})?\b`)
+	minecraftReleaseIDPattern = regexp.MustCompile(`^(?:1\.[0-9]+(?:\.[0-9]+)?|[0-9]{2}\.[0-9]+(?:\.[0-9]+)?)$`)
 )
 
 var networkClient = &http.Client{
@@ -68,6 +79,7 @@ type app struct {
 	home           string
 	server         *serverProcess
 	playit         *playItAgentProcess
+	wake           *wakeOnConnectService
 	activeMu       sync.RWMutex
 	activeServerID string
 	statsMu        sync.Mutex
@@ -157,6 +169,7 @@ type setupRequest struct {
 	MinecraftVersion        string          `json:"minecraftVersion"`
 	Loader                  string          `json:"loader"`
 	Seed                    string          `json:"seed"`
+	WorldUploadID           string          `json:"worldUploadId"`
 	JarMode                 string          `json:"jarMode"`
 	CustomJarID             string          `json:"customJarId"`
 	MemoryMB                int             `json:"memoryMb"`
@@ -300,20 +313,32 @@ type serverProcess struct {
 	logs      []string
 	ready     bool
 	stopping  bool
+	runtime   string
+}
+
+type wakeOnConnectService struct {
+	mu       sync.Mutex
+	listener net.Listener
+	port     int
+	starting bool
 }
 
 type playItAgentProcess struct {
 	mu        sync.Mutex
 	cmd       *exec.Cmd
+	cliCmd    *exec.Cmd
 	done      chan error
 	startedAt *time.Time
+	serverID  string
 	lastError string
 	logs      []string
 	starting  bool
 }
 
 type modSearchHit struct {
+	Provider            string   `json:"provider,omitempty"`
 	ProjectID           string   `json:"project_id"`
+	ProjectIDAlt        string   `json:"projectId,omitempty"`
 	Slug                string   `json:"slug"`
 	Title               string   `json:"title"`
 	Description         string   `json:"description"`
@@ -325,6 +350,8 @@ type modSearchHit struct {
 	ServerSide          string   `json:"server_side"`
 	IconURL             string   `json:"icon_url"`
 	LatestVersion       string   `json:"latest_version"`
+	WebsiteURL          string   `json:"websiteUrl,omitempty"`
+	Author              string   `json:"author,omitempty"`
 	Compatible          bool     `json:"compatible"`
 	CompatibilityReason string   `json:"compatibilityReason,omitempty"`
 	SupportedLoaders    []string `json:"supportedLoaders,omitempty"`
@@ -338,8 +365,97 @@ type modSearchResponse struct {
 }
 
 type installModRequest struct {
+	Provider  string `json:"provider"`
 	ProjectID string `json:"projectId"`
 	VersionID string `json:"versionId"`
+}
+
+type modVersionOption struct {
+	Provider      string   `json:"provider"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	VersionNumber string   `json:"versionNumber,omitempty"`
+	FileName      string   `json:"fileName,omitempty"`
+	GameVersions  []string `json:"gameVersions,omitempty"`
+	Loaders       []string `json:"loaders,omitempty"`
+	ReleaseType   string   `json:"releaseType,omitempty"`
+	Downloads     int      `json:"downloads,omitempty"`
+	Date          string   `json:"date,omitempty"`
+	Primary       bool     `json:"primary,omitempty"`
+}
+
+type curseForgeKeyRequest struct {
+	APIKey string `json:"apiKey"`
+}
+
+type termuxCommandRequest struct {
+	Command        string `json:"command"`
+	Cwd            string `json:"cwd"`
+	TimeoutSeconds int    `json:"timeoutSeconds"`
+}
+
+type termuxCommandResponse struct {
+	Command    string `json:"command"`
+	Cwd        string `json:"cwd"`
+	ExitCode   int    `json:"exitCode"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	DurationMS int64  `json:"durationMs"`
+}
+
+type updatePlanResponse struct {
+	ServerID     string            `json:"serverId"`
+	Minecraft    updateRuntimePlan `json:"minecraft"`
+	Mods         []updateModPlan   `json:"mods"`
+	Blockers     []updateModPlan   `json:"blockers"`
+	RequiresStop bool              `json:"requiresStop"`
+}
+
+type updateRuntimePlan struct {
+	CurrentVersion          string `json:"currentVersion"`
+	TargetVersion           string `json:"targetVersion"`
+	Loader                  string `json:"loader"`
+	Source                  string `json:"source,omitempty"`
+	Warning                 string `json:"warning,omitempty"`
+	UpdateAvailable         bool   `json:"updateAvailable"`
+	RuntimeRefreshAvailable bool   `json:"runtimeRefreshAvailable"`
+	Message                 string `json:"message,omitempty"`
+}
+
+type updateModPlan struct {
+	ProjectID       string `json:"projectId,omitempty"`
+	VersionID       string `json:"versionId,omitempty"`
+	TargetVersionID string `json:"targetVersionId,omitempty"`
+	CurrentName     string `json:"currentName,omitempty"`
+	TargetName      string `json:"targetName,omitempty"`
+	FileName        string `json:"fileName"`
+	TargetFileName  string `json:"targetFileName,omitempty"`
+	TargetFolder    string `json:"targetFolder"`
+	Source          string `json:"source"`
+	Status          string `json:"status"`
+	Reason          string `json:"reason,omitempty"`
+	UpdateAvailable bool   `json:"updateAvailable"`
+}
+
+type updateApplyRequest struct {
+	UpdateMinecraft        bool              `json:"updateMinecraft"`
+	TargetMinecraftVersion string            `json:"targetMinecraftVersion,omitempty"`
+	UpdateMods             bool              `json:"updateMods"`
+	ModChoices             map[string]string `json:"modChoices,omitempty"`
+}
+
+type updateApplyResponse struct {
+	ServerID string              `json:"serverId"`
+	BackupID string              `json:"backupId,omitempty"`
+	Results  []updateApplyResult `json:"results"`
+	Plan     updatePlanResponse  `json:"plan"`
+}
+
+type updateApplyResult struct {
+	Name     string `json:"name"`
+	FileName string `json:"fileName,omitempty"`
+	Action   string `json:"action"`
+	Message  string `json:"message,omitempty"`
 }
 
 type modrinthVersion struct {
@@ -366,6 +482,68 @@ type modrinthDependency struct {
 	VersionID      string `json:"version_id"`
 	ProjectID      string `json:"project_id"`
 	DependencyType string `json:"dependency_type"`
+}
+
+type curseForgeSearchResponse struct {
+	Data       []curseForgeMod `json:"data"`
+	Pagination struct {
+		TotalCount int `json:"totalCount"`
+	} `json:"pagination"`
+}
+
+type curseForgeMod struct {
+	ID            int    `json:"id"`
+	Name          string `json:"name"`
+	Slug          string `json:"slug"`
+	Summary       string `json:"summary"`
+	DownloadCount int    `json:"downloadCount"`
+	Logo          struct {
+		URL          string `json:"url"`
+		ThumbnailURL string `json:"thumbnailUrl"`
+	} `json:"logo"`
+	Links struct {
+		WebsiteURL string `json:"websiteUrl"`
+	} `json:"links"`
+	Categories []struct {
+		Name string `json:"name"`
+		Slug string `json:"slug"`
+	} `json:"categories"`
+	Authors []struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	} `json:"authors"`
+	LatestFilesIndexes []struct {
+		GameVersion string `json:"gameVersion"`
+		FileID      int    `json:"fileId"`
+		Filename    string `json:"filename"`
+		ReleaseType int    `json:"releaseType"`
+		ModLoader   int    `json:"modLoader"`
+	} `json:"latestFilesIndexes"`
+}
+
+type curseForgeFilesResponse struct {
+	Data []curseForgeFile `json:"data"`
+}
+
+type curseForgeFileResponse struct {
+	Data curseForgeFile `json:"data"`
+}
+
+type curseForgeDownloadURLResponse struct {
+	Data string `json:"data"`
+}
+
+type curseForgeFile struct {
+	ID            int      `json:"id"`
+	ModID         int      `json:"modId"`
+	DisplayName   string   `json:"displayName"`
+	FileName      string   `json:"fileName"`
+	ReleaseType   int      `json:"releaseType"`
+	FileDate      string   `json:"fileDate"`
+	DownloadURL   string   `json:"downloadUrl"`
+	FileLength    int64    `json:"fileLength"`
+	DownloadCount int      `json:"downloadCount"`
+	GameVersions  []string `json:"gameVersions"`
 }
 
 type lockfile struct {
@@ -416,6 +594,149 @@ type serverFileInfo struct {
 	Modified  time.Time `json:"modified"`
 }
 
+type worldMapResponse struct {
+	ServerID    string               `json:"serverId"`
+	Dimension   string               `json:"dimension"`
+	WorldName   string               `json:"worldName"`
+	Available   []worldDimensionInfo `json:"availableDimensions"`
+	Chunks      []worldMapChunk      `json:"chunks"`
+	Bounds      worldMapBounds       `json:"bounds"`
+	Limit       int                  `json:"limit"`
+	TotalChunks int                  `json:"totalChunks"`
+	Mode        string               `json:"mode,omitempty"`
+	Truncated   bool                 `json:"truncated"`
+	Warning     string               `json:"warning,omitempty"`
+}
+
+type worldDimensionInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Available   bool   `json:"available"`
+	RegionFiles int    `json:"regionFiles"`
+}
+
+type worldMapChunk struct {
+	X      int      `json:"x"`
+	Z      int      `json:"z"`
+	Color  string   `json:"color,omitempty"`
+	Pixels []string `json:"pixels,omitempty"`
+}
+
+type worldMapBounds struct {
+	MinX int `json:"minX"`
+	MaxX int `json:"maxX"`
+	MinZ int `json:"minZ"`
+	MaxZ int `json:"maxZ"`
+}
+
+type worldPlayersResponse struct {
+	Online      int                 `json:"online"`
+	Players     []worldPlayerMarker `json:"players"`
+	RefreshedAt time.Time           `json:"refreshedAt"`
+}
+
+type worldPlayerMarker struct {
+	Name      string  `json:"name"`
+	Dimension string  `json:"dimension,omitempty"`
+	X         float64 `json:"x,omitempty"`
+	Y         float64 `json:"y,omitempty"`
+	Z         float64 `json:"z,omitempty"`
+	ChunkX    int     `json:"chunkX,omitempty"`
+	ChunkZ    int     `json:"chunkZ,omitempty"`
+	Available bool    `json:"available"`
+	Error     string  `json:"error,omitempty"`
+}
+
+type worldTrimRequest struct {
+	Dimension string          `json:"dimension"`
+	Areas     []worldTrimArea `json:"areas"`
+}
+
+type worldTrimArea struct {
+	MinChunkX int `json:"minChunkX"`
+	MaxChunkX int `json:"maxChunkX"`
+	MinChunkZ int `json:"minChunkZ"`
+	MaxChunkZ int `json:"maxChunkZ"`
+}
+
+type worldTrimResponse struct {
+	ServerID             string `json:"serverId"`
+	Dimension            string `json:"dimension"`
+	WorldName            string `json:"worldName"`
+	BackupID             string `json:"backupId"`
+	BeforeChunks         int    `json:"beforeChunks"`
+	KeptChunks           int    `json:"keptChunks"`
+	DeletedChunks        int    `json:"deletedChunks"`
+	RegionFilesRemoved   int    `json:"regionFilesRemoved"`
+	RegionFilesCompacted int    `json:"regionFilesCompacted"`
+}
+
+type worldTrimStats struct {
+	BeforeChunks         int
+	KeptChunks           int
+	DeletedChunks        int
+	RegionFilesRemoved   int
+	RegionFilesCompacted int
+}
+
+type modWorldScanRequest struct {
+	Namespaces []string `json:"namespaces"`
+	Dimensions []string `json:"dimensions,omitempty"`
+}
+
+type modWorldScanResponse struct {
+	ServerID           string                    `json:"serverId"`
+	WorldName          string                    `json:"worldName"`
+	Namespaces         []string                  `json:"namespaces"`
+	Dimensions         []modWorldDimensionReport `json:"dimensions"`
+	TotalChunksScanned int                       `json:"totalChunksScanned"`
+	TotalChunksMatched int                       `json:"totalChunksMatched"`
+	TotalBlocks        int                       `json:"totalBlocks"`
+	TotalBlockEntities int                       `json:"totalBlockEntities"`
+	TotalEntities      int                       `json:"totalEntities"`
+	BackupID           string                    `json:"backupId,omitempty"`
+	Cleaned            bool                      `json:"cleaned"`
+}
+
+type modWorldDimensionReport struct {
+	Dimension          string `json:"dimension"`
+	RegionFiles        int    `json:"regionFiles"`
+	RegionFilesChanged int    `json:"regionFilesChanged,omitempty"`
+	ChunksScanned      int    `json:"chunksScanned"`
+	ChunksMatched      int    `json:"chunksMatched"`
+	ChunksCleaned      int    `json:"chunksCleaned,omitempty"`
+	Blocks             int    `json:"blocks"`
+	BlockEntities      int    `json:"blockEntities"`
+	Entities           int    `json:"entities"`
+	Warning            string `json:"warning,omitempty"`
+}
+
+type modWorldChunkReport struct {
+	Blocks        int
+	BlockEntities int
+	Entities      int
+	Changed       bool
+}
+
+type nbtTreeTag struct {
+	Type     byte
+	Name     string
+	ListType byte
+	Value    any
+}
+
+type worldRegionChunkRef struct {
+	RegionPath string
+	RegionX    int
+	RegionZ    int
+	LocalX     int
+	LocalZ     int
+	ChunkX     int
+	ChunkZ     int
+}
+
+type nbtCompound map[string]any
+
 type serverFilePutRequest struct {
 	Content string `json:"content"`
 }
@@ -442,6 +763,16 @@ type paperVersionsResponse struct {
 			} `json:"support"`
 		} `json:"version"`
 	} `json:"versions"`
+}
+
+type fabricGameVersion struct {
+	Version string `json:"version"`
+	Stable  bool   `json:"stable"`
+}
+
+type quiltGameVersion struct {
+	Version string `json:"version"`
+	Stable  bool   `json:"stable"`
 }
 
 type paperBuild struct {
@@ -482,6 +813,7 @@ func main() {
 		home:           home,
 		server:         &serverProcess{},
 		playit:         &playItAgentProcess{},
+		wake:           &wakeOnConnectService{},
 		activeServerID: defaultServerID,
 	}
 	a.loadActiveServerID()
@@ -490,6 +822,7 @@ func main() {
 	}
 	a.startConfiguredServerIfNeeded()
 	a.startBackupScheduler()
+	a.startWakeOnConnectMonitor()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /assets/app-icon.png", a.handleAppIcon)
@@ -507,6 +840,7 @@ func main() {
 	mux.HandleFunc("POST /api/config", a.handleConfigPost)
 	mux.HandleFunc("POST /api/server/setup", a.handleServerSetup)
 	mux.HandleFunc("POST /api/server/setup/jar", a.handleServerSetupJarUpload)
+	mux.HandleFunc("POST /api/server/setup/world", a.handleServerSetupWorldUpload)
 	mux.HandleFunc("POST /api/server/start", a.handleServerStart)
 	mux.HandleFunc("POST /api/server/stop", a.handleServerStop)
 	mux.HandleFunc("POST /api/server/restart", a.handleServerRestart)
@@ -523,12 +857,23 @@ func main() {
 	mux.HandleFunc("POST /api/server/file/upload", a.handleServerFileUpload)
 	mux.HandleFunc("POST /api/server/icon", a.handleServerIconUpload)
 	mux.HandleFunc("POST /api/server/resource-pack", a.handleServerResourcePackUpload)
+	mux.HandleFunc("GET /api/world/map", a.handleWorldMap)
+	mux.HandleFunc("GET /api/world/players", a.handleWorldPlayers)
+	mux.HandleFunc("POST /api/world/trim", a.handleWorldTrim)
+	mux.HandleFunc("POST /api/world/mods/scan", a.handleWorldModsScan)
+	mux.HandleFunc("POST /api/world/mods/cleanup", a.handleWorldModsCleanup)
+	mux.HandleFunc("GET /api/updates", a.handleUpdatesPlan)
+	mux.HandleFunc("POST /api/updates/apply", a.handleUpdatesApply)
 	mux.HandleFunc("GET /api/mods", a.handleModsList)
+	mux.HandleFunc("GET /api/mods/providers", a.handleModsProviders)
 	mux.HandleFunc("GET /api/mods/search", a.handleModsSearch)
+	mux.HandleFunc("GET /api/mods/versions", a.handleModVersions)
 	mux.HandleFunc("POST /api/mods/install", a.handleModsInstall)
 	mux.HandleFunc("POST /api/mods/uninstall", a.handleModsUninstall)
 	mux.HandleFunc("POST /api/mods/upload", a.handleModsUpload)
 	mux.HandleFunc("POST /api/mods/rollback", a.handleModsRollback)
+	mux.HandleFunc("POST /api/mods/curseforge/key", a.handleCurseForgeKeySave)
+	mux.HandleFunc("DELETE /api/mods/curseforge/key", a.handleCurseForgeKeyDelete)
 	mux.HandleFunc("GET /api/backups", a.handleBackupsList)
 	mux.HandleFunc("POST /api/backups/create", a.handleBackupsCreate)
 	mux.HandleFunc("POST /api/backups/restore", a.handleBackupsRestore)
@@ -538,6 +883,8 @@ func main() {
 	mux.HandleFunc("DELETE /api/backups/", a.handleBackupsDelete)
 	mux.HandleFunc("GET /api/diagnostics", a.handleDiagnostics)
 	mux.HandleFunc("POST /api/diagnostics/export", a.handleDiagnosticsExport)
+	mux.HandleFunc("GET /api/termux/info", a.handleTermuxInfo)
+	mux.HandleFunc("POST /api/termux/command", a.handleTermuxCommand)
 
 	addr := getenv("MINEMUX_ADDR", getenv("CRAFTNODE_ADDR", defaultBindAddr))
 	server := &http.Server{
@@ -724,7 +1071,7 @@ func (a *app) defaultProfile(mcVersion string, javaVersion int) profile {
 		Features: profileFeatures{
 			AutoStart:                          false,
 			RestartOnCrash:                     true,
-			CreateRestorePointBeforeModChanges: true,
+			CreateRestorePointBeforeModChanges: false,
 		},
 		Backups: backupPolicy{
 			AutoEnabled:     false,
@@ -769,12 +1116,40 @@ func (a *app) startConfiguredServerIfNeeded() {
 	}
 	go func() {
 		time.Sleep(1500 * time.Millisecond)
-		if err := a.server.start(context.Background(), a, p); err != nil {
+		if err := a.server.startWithOptions(context.Background(), a, p, true); err != nil {
 			a.server.mu.Lock()
 			a.server.lastError = "auto-start failed: " + err.Error()
 			a.server.mu.Unlock()
 		}
 	}()
+}
+
+func (a *app) startWakeOnConnectMonitor() {
+	go func() {
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		for {
+			<-timer.C
+			a.refreshWakeOnConnect()
+			timer.Reset(5 * time.Second)
+		}
+	}()
+}
+
+func (a *app) refreshWakeOnConnect() {
+	if a.wake == nil {
+		return
+	}
+	if a.server.isActive() {
+		a.wake.stop()
+		return
+	}
+	p, err := a.loadProfile()
+	if err != nil || p == nil || !a.serverInstalled(p) || p.Features.AutoStart {
+		a.wake.stop()
+		return
+	}
+	a.wake.start(a, p)
 }
 
 func (a *app) startBackupScheduler() {
@@ -1073,6 +1448,9 @@ func (s *serverProcess) start(ctx context.Context, a *app, p *profile) error {
 }
 
 func (s *serverProcess) startWithOptions(ctx context.Context, a *app, p *profile, bypassCooldown bool) error {
+	if a != nil && a.wake != nil {
+		a.wake.stop()
+	}
 	s.mu.Lock()
 	alreadyRunning := s.cmd != nil && s.cmd.Process != nil
 	coolingDown := !bypassCooldown && s.stoppedAt != nil && time.Since(*s.stoppedAt) < 30*time.Second
@@ -1088,6 +1466,9 @@ func (s *serverProcess) startWithOptions(ctx context.Context, a *app, p *profile
 		return errors.New("server profile is missing; run setup first")
 	}
 	if err := a.ensurePlayItPluginBeforeStart(p); err != nil {
+		return err
+	}
+	if err := a.ensureFabricRuntimeDependenciesBeforeStart(p); err != nil {
 		return err
 	}
 
@@ -1143,6 +1524,7 @@ func (s *serverProcess) startWithOptions(ctx context.Context, a *app, p *profile
 
 	now := time.Now().UTC()
 	done := make(chan error, 1)
+	s.logs = nil
 	s.cmd = cmd
 	s.stdin = stdin
 	s.done = done
@@ -1151,12 +1533,17 @@ func (s *serverProcess) startWithOptions(ctx context.Context, a *app, p *profile
 	s.lastError = ""
 	s.ready = false
 	s.stopping = false
+	s.runtime = strings.ToLower(strings.TrimSpace(p.Loader))
 	s.appendLogLocked(fmt.Sprintf("%s server started with pid %d", p.Loader, cmd.Process.Pid))
 
 	go s.capture(stdout)
 	go s.capture(stderr)
 	go s.wait(cmd, done)
 	s.mu.Unlock()
+
+	if p.PlayIt.Enabled && !strings.EqualFold(p.Loader, "paper") {
+		go a.startPlayItAgentForProfile(p)
+	}
 
 	return nil
 }
@@ -1284,6 +1671,116 @@ func (s *serverProcess) send(command string) error {
 	return err
 }
 
+func (s *serverProcess) isActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cmd != nil && s.cmd.Process != nil
+}
+
+func (w *wakeOnConnectService) start(a *app, p *profile) {
+	if w == nil || a == nil || p == nil {
+		return
+	}
+	port := p.Ports.JavaTCP
+	if port <= 0 {
+		port = 25565
+	}
+	w.mu.Lock()
+	if w.listener != nil && w.port == port {
+		w.mu.Unlock()
+		return
+	}
+	w.closeLocked()
+	listener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+	if err != nil {
+		w.mu.Unlock()
+		return
+	}
+	w.listener = listener
+	w.port = port
+	w.starting = false
+	w.mu.Unlock()
+
+	a.appendServerLog("Wake-on-connect listening on Java port " + strconv.Itoa(port))
+	go w.acceptLoop(a, listener)
+}
+
+func (w *wakeOnConnectService) stop() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closeLocked()
+	w.starting = false
+}
+
+func (w *wakeOnConnectService) closeLocked() {
+	if w.listener != nil {
+		_ = w.listener.Close()
+		w.listener = nil
+	}
+	w.port = 0
+}
+
+func (w *wakeOnConnectService) acceptLoop(a *app, listener net.Listener) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+		w.trigger(a)
+	}
+}
+
+func (w *wakeOnConnectService) trigger(a *app) {
+	if w == nil || a == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.starting {
+		w.mu.Unlock()
+		return
+	}
+	w.starting = true
+	w.closeLocked()
+	w.mu.Unlock()
+
+	a.appendServerLog("Wake-on-connect received a client ping; starting server.")
+	go func() {
+		p, err := a.loadProfile()
+		if err != nil {
+			a.appendServerLog("Wake-on-connect failed: " + err.Error())
+			w.mu.Lock()
+			w.starting = false
+			w.mu.Unlock()
+			return
+		}
+		if javaMajor := detectJavaMajor(); javaMajor > 0 && p.JavaVersion != javaMajor {
+			p.JavaVersion = javaMajor
+			_ = a.saveProfile(p)
+		}
+		if err := a.server.start(context.Background(), a, p); err != nil {
+			a.appendServerLog("Wake-on-connect start failed: " + err.Error())
+			w.mu.Lock()
+			w.starting = false
+			w.mu.Unlock()
+			time.AfterFunc(3*time.Second, a.refreshWakeOnConnect)
+			return
+		}
+		w.mu.Lock()
+		w.starting = false
+		w.mu.Unlock()
+	}()
+}
+
+func (a *app) appendServerLog(line string) {
+	a.server.mu.Lock()
+	defer a.server.mu.Unlock()
+	a.server.appendLogLocked(line)
+}
+
 func (s *serverProcess) status(a *app) serverStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1318,24 +1815,39 @@ func (s *serverProcess) status(a *app) serverStatus {
 		port = p.Ports.JavaTCP
 	}
 	status.JoinAddress = localJoinAddress(port)
-	status.PlayIt = a.playItStatus(p, lines)
+	status.PlayIt = a.playItStatus(p, status.Running, s.logs)
 	status.WorldSeed = worldSeedFromProfileAndLogs(p, lines)
 	return status
 }
 
-func (a *app) playItStatus(p *profile, serverLines []string) playItStatus {
-	lines := append([]string{}, serverLines...)
-	lines = append(lines, a.playit.logLines()...)
-	status := playItStatusFromLogs(p, lines)
-	status.Mode = "plugin"
-	agentRunning, agentStartedAt, errorText := a.playit.state(status.Error)
+func (a *app) playItStatus(p *profile, serverRunning bool, serverLines []string) playItStatus {
+	status := playItStatus{}
+	if p == nil || !p.PlayIt.Enabled {
+		return status
+	}
+	lines := []string{}
+	if serverRunning {
+		lines = append(lines, serverLines...)
+	}
+	serverID := p.ID
+	if serverID == "" {
+		serverID = a.activeServerIDValue()
+	}
+	lines = append(lines, a.playit.logLinesForServer(serverID)...)
+	status = playItStatusFromLogs(p, lines)
+	if strings.EqualFold(p.Loader, "paper") {
+		status.Mode = "plugin"
+	} else {
+		status.Mode = "standalone-agent"
+	}
+	agentRunning, agentStartedAt, errorText := a.playit.stateForServer(serverID, status.Error)
 	status.Running = agentRunning
 	status.StartedAt = agentStartedAt
 	status.Error = errorText
 	if agentRunning || agentStartedAt != nil {
-		status.Mode = "agent-fallback"
+		status.Mode = "standalone-agent"
 	}
-	status.AgentInstalled = playItExecutablePath() != ""
+	status.AgentInstalled = a.playItStandaloneAgentInstalled()
 	return status
 }
 
@@ -1418,15 +1930,20 @@ func playItSecretVerified(lower string) bool {
 
 func playItErrorFromLogLine(lower string) string {
 	switch {
+	case strings.Contains(lower, "service manager not available") ||
+		strings.Contains(lower, "systemctl"):
+		return "The packaged PlayIt service wrapper cannot run in Termux. MineMux uses a standalone PlayIt daemon instead; restart PlayIt to switch over."
 	case strings.Contains(lower, "unsupportedaddresstypeexception"):
-		return "PlayIt hit an Android IPv6 socket issue. Set the PlayIt agent/tunnel to IPv4 only; use the fallback agent only if the plugin still fails."
+		return "PlayIt hit an Android IPv6 socket issue. Set the PlayIt tunnel to IPv4 only, then restart the agent."
 	case strings.Contains(lower, "address family not supported") ||
 		strings.Contains(lower, "network is unreachable") ||
 		strings.Contains(lower, "failed to send initial ping") ||
 		strings.Contains(lower, "failed to reload_control_addr"):
 		return "PlayIt agent could not connect to tunnel control servers. Check mobile data/Wi-Fi, VPN, private DNS, and retry."
 	case strings.Contains(lower, "failed to get control addresses") ||
-		strings.Contains(lower, "failed when communicating with tunnel server"):
+		strings.Contains(lower, "failed when communicating with tunnel server") ||
+		strings.Contains(lower, "failed to lookup address information") ||
+		strings.Contains(lower, "dns error"):
 		return "PlayIt could not reach its tunnel control servers. Check mobile data/Wi-Fi, VPN, private DNS, and try again."
 	case strings.Contains(lower, "api error code: 400") && strings.Contains(lower, "codenotfound"):
 		return "PlayIt claim code was not accepted yet or expired. Open the latest claim link and try again."
@@ -1526,6 +2043,18 @@ func (s *serverProcess) logLines() []string {
 	return out
 }
 
+func (s *serverProcess) clearTransientLogs() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cmd != nil && s.cmd.Process != nil {
+		return
+	}
+	s.logs = nil
+	s.lastError = ""
+	s.ready = false
+	s.stopping = false
+}
+
 func (a *app) mergedServerLogLines(limit int) []string {
 	lines := append([]string{}, tailTextFile(filepath.Join(a.paths().ServerMain, "logs", "latest.log"), limit)...)
 	lines = append(lines, a.server.logLines()...)
@@ -1544,11 +2073,31 @@ func (a *app) playItSecretPath() string {
 	return filepath.Join(a.playItDir(), "playit.toml")
 }
 
+func (a *app) playItSocketPath() string {
+	return filepath.Join(a.playItDir(), "playit.sock")
+}
+
+func (a *app) playItLogPath() string {
+	return filepath.Join(a.playItDir(), "playitd.log")
+}
+
+func (a *app) playItManagedDaemonPath() string {
+	return filepath.Join(a.playItDir(), "bin", "playitd")
+}
+
+func (a *app) playItManagedCLIPath() string {
+	return filepath.Join(a.playItDir(), "bin", "playit-cli")
+}
+
 func (a *app) startPlayItAgentForProfile(p *profile) {
 	if p == nil || !p.PlayIt.Enabled {
 		return
 	}
-	if err := a.playit.start(context.Background(), a); err != nil {
+	serverID := p.ID
+	if serverID == "" {
+		serverID = a.activeServerIDValue()
+	}
+	if err := a.playit.start(context.Background(), a, serverID); err != nil {
 		a.playit.setError(err.Error())
 		a.server.mu.Lock()
 		a.server.appendLogLocked("PlayIt agent failed: " + err.Error())
@@ -1556,14 +2105,21 @@ func (a *app) startPlayItAgentForProfile(p *profile) {
 	}
 }
 
-func (p *playItAgentProcess) start(ctx context.Context, a *app) error {
+func (p *playItAgentProcess) start(ctx context.Context, a *app, serverID string) error {
 	p.mu.Lock()
-	if p.cmd != nil && p.cmd.Process != nil || p.starting {
+	if (p.cmd != nil && p.cmd.Process != nil) || p.starting {
+		if p.serverID == "" || p.serverID == serverID {
+			p.mu.Unlock()
+			return nil
+		}
 		p.mu.Unlock()
-		return nil
+		return errors.New("PlayIt agent is already running for another server")
 	}
 	p.starting = true
+	p.serverID = serverID
+	p.startedAt = nil
 	p.lastError = ""
+	p.logs = nil
 	p.mu.Unlock()
 	startFailed := true
 	defer func() {
@@ -1579,14 +2135,15 @@ func (p *playItAgentProcess) start(ctx context.Context, a *app) error {
 	}); err != nil {
 		return err
 	}
-	executable := playItExecutablePath()
-	if executable == "" {
-		return errors.New("playit-cli is not installed; open Terminal and run: pkg install tur-repo playit")
+	daemonPath := a.playItDaemonPath()
+	if _, err := os.Stat(daemonPath); err != nil {
+		return errors.New("PlayIt standalone daemon is not installed")
 	}
 	if err := os.MkdirAll(a.playItDir(), 0o700); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, executable, "-s")
+	_ = os.Remove(a.playItSocketPath())
+	cmd := exec.CommandContext(ctx, daemonPath, "--secret-path", a.playItSecretPath(), "--socket-path", a.playItSocketPath(), "--log-path", a.playItLogPath())
 	cmd.Dir = a.playItDir()
 	cmd.Env = append(cleanJavaEnv(os.Environ()),
 		"PLAYIT_SECRET_PATH="+a.playItSecretPath(),
@@ -1610,22 +2167,80 @@ func (p *playItAgentProcess) start(ctx context.Context, a *app) error {
 	p.cmd = cmd
 	p.done = done
 	p.startedAt = &now
+	p.serverID = serverID
 	p.starting = false
 	p.appendLogLocked("PlayIt agent started with pid " + strconv.Itoa(cmd.Process.Pid))
+	p.appendLogLocked("Using PlayIt daemon from " + playItBinarySource(daemonPath))
 	p.mu.Unlock()
 	startFailed = false
 
 	go p.capture(stdout)
 	go p.capture(stderr)
 	go p.wait(cmd, done)
+	go p.attachPlayItCLI(ctx, a)
 	return nil
+}
+
+func (p *playItAgentProcess) attachPlayItCLI(ctx context.Context, a *app) {
+	cliPath := a.playItCLIPath()
+	if _, err := os.Stat(cliPath); err != nil {
+		return
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(a.playItSocketPath()); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	cmd := exec.CommandContext(ctx, cliPath, "--socket-path", a.playItSocketPath(), "-s")
+	cmd.Dir = a.playItDir()
+	cmd.Env = append(cleanJavaEnv(os.Environ()),
+		"XDG_CONFIG_HOME="+filepath.Join(a.home, ".config"),
+	)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		p.appendLog("PlayIt CLI attach failed: " + err.Error())
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		p.appendLog("PlayIt CLI attach failed: " + err.Error())
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		p.appendLog("PlayIt CLI attach failed: " + err.Error())
+		return
+	}
+	p.mu.Lock()
+	p.cliCmd = cmd
+	p.mu.Unlock()
+	p.appendLog("PlayIt CLI attached to local daemon from " + playItBinarySource(cliPath))
+	go p.capture(stdout)
+	go p.capture(stderr)
+	if err := cmd.Wait(); err != nil && ctx.Err() == nil {
+		p.appendLog("PlayIt CLI attach stopped: " + err.Error())
+	}
+	p.mu.Lock()
+	if p.cliCmd == cmd {
+		p.cliCmd = nil
+	}
+	p.mu.Unlock()
 }
 
 func (p *playItAgentProcess) stop(timeout time.Duration) error {
 	p.mu.Lock()
 	cmd := p.cmd
+	cliCmd := p.cliCmd
 	done := p.done
 	p.mu.Unlock()
+	if cliCmd != nil && cliCmd.Process != nil {
+		_ = cliCmd.Process.Kill()
+	}
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
@@ -1664,6 +2279,10 @@ func (p *playItAgentProcess) wait(cmd *exec.Cmd, done chan error) {
 		return
 	}
 	p.cmd = nil
+	if p.cliCmd != nil && p.cliCmd.Process != nil {
+		_ = p.cliCmd.Process.Kill()
+		p.cliCmd = nil
+	}
 	p.done = nil
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "signal: killed") {
@@ -1686,9 +2305,23 @@ func (p *playItAgentProcess) logLines() []string {
 	return out
 }
 
-func (p *playItAgentProcess) state(existingError string) (bool, *time.Time, string) {
+func (p *playItAgentProcess) logLinesForServer(serverID string) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if serverID == "" || p.serverID != serverID {
+		return nil
+	}
+	out := make([]string, len(p.logs))
+	copy(out, p.logs)
+	return out
+}
+
+func (p *playItAgentProcess) stateForServer(serverID, existingError string) (bool, *time.Time, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if serverID == "" || p.serverID != serverID {
+		return false, nil, existingError
+	}
 	running := p.starting || (p.cmd != nil && p.cmd.Process != nil)
 	startedAt := p.startedAt
 	err := existingError
@@ -1696,6 +2329,21 @@ func (p *playItAgentProcess) state(existingError string) (bool, *time.Time, stri
 		err = p.lastError
 	}
 	return running, startedAt, err
+}
+
+func (p *playItAgentProcess) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cmd != nil && p.cmd.Process != nil {
+		return
+	}
+	p.cliCmd = nil
+	p.done = nil
+	p.startedAt = nil
+	p.serverID = ""
+	p.lastError = ""
+	p.logs = nil
+	p.starting = false
 }
 
 func (p *playItAgentProcess) appendLog(line string) {
@@ -1719,15 +2367,50 @@ func (p *playItAgentProcess) appendLogLocked(line string) {
 }
 
 func (a *app) ensurePlayItAgentInstalled(logLine func(string)) error {
-	if playItExecutablePath() != "" {
-		return nil
-	}
 	if err := ensureTermuxDNSConfigured(); err != nil && logLine != nil {
 		logLine("Could not update Termux DNS resolver before PlayIt install: " + err.Error())
 	}
-	if _, err := exec.LookPath("pkg"); err != nil {
-		return errors.New("Termux pkg is unavailable; open Terminal and run: pkg install tur-repo playit")
+	if a.playItPackagedAgentInstalled() || (a.playItStandaloneAgentInstalled() && a.playItPackagedCLIPath() != "") {
+		return nil
 	}
+	if shouldPreferPackagedPlayItAgent() {
+		if err := a.installPackagedPlayItAgent(logLine); err == nil && a.playItStandaloneAgentInstalled() {
+			return nil
+		} else if err != nil && logLine != nil && !a.playItStandaloneAgentInstalled() {
+			logLine("Termux PlayIt package install failed: " + err.Error())
+		}
+	}
+	if a.playItStandaloneAgentInstalled() {
+		return nil
+	}
+	if err := a.installManagedPlayItAgent(logLine); err == nil {
+		return nil
+	} else if logLine != nil {
+		logLine("Standalone PlayIt download failed: " + err.Error())
+	}
+	if a.playItManagedAgentInstalled() {
+		return nil
+	}
+	if err := a.installPackagedPlayItAgent(logLine); err != nil {
+		if termuxPkgPath() == "" {
+			return errors.New("could not install PlayIt standalone agent; Termux pkg is unavailable and the direct download failed")
+		}
+		if !a.playItStandaloneAgentInstalled() {
+			return fmt.Errorf("could not install PlayIt standalone agent; direct download failed and Termux package install failed: %w", err)
+		}
+	}
+	if !a.playItStandaloneAgentInstalled() {
+		return errors.New("could not install PlayIt standalone agent; direct download failed and the Termux package did not provide playitd/playit-cli")
+	}
+	return nil
+}
+
+func (a *app) installPackagedPlayItAgent(logLine func(string)) error {
+	pkgPath := termuxPkgPath()
+	if pkgPath == "" {
+		return errors.New("Termux pkg is unavailable")
+	}
+	var installErrors []string
 	for _, args := range [][]string{
 		{"install", "-y", "tur-repo"},
 		{"install", "-y", playItPackageName},
@@ -1735,16 +2418,149 @@ func (a *app) ensurePlayItAgentInstalled(logLine func(string)) error {
 		if logLine != nil {
 			logLine("Running pkg " + strings.Join(args, " "))
 		}
-		cmd := exec.Command("pkg", args...)
+		cmd := exec.Command(pkgPath, args...)
 		cmd.Env = cleanJavaEnv(os.Environ())
-		if err := runCommandStreaming(cmd, logLine); err != nil && logLine != nil {
-			logLine("pkg " + strings.Join(args, " ") + " failed: " + err.Error())
+		var captured strings.Builder
+		logger := func(line string) {
+			captured.WriteString(line)
+			captured.WriteString("\n")
+			if logLine != nil {
+				logLine(line)
+			}
+		}
+		if err := runCommandStreaming(cmd, logger); err != nil {
+			detail := strings.TrimSpace(captured.String())
+			if detail != "" {
+				installErrors = append(installErrors, "pkg "+strings.Join(args, " ")+": "+lastLines(detail, 8))
+			} else {
+				installErrors = append(installErrors, "pkg "+strings.Join(args, " ")+": "+err.Error())
+			}
+			if logLine != nil {
+				logLine("pkg " + strings.Join(args, " ") + " failed: " + err.Error())
+			}
 		}
 	}
-	if playItExecutablePath() == "" {
-		return errors.New("could not install PlayIt agent; open Terminal and run: pkg install tur-repo playit")
+	if a.playItPackagedAgentInstalled() {
+		return nil
+	}
+	if len(installErrors) > 0 {
+		return fmt.Errorf("Termux package did not provide a complete PlayIt daemon/CLI set. Last output: %s", strings.Join(installErrors, " | "))
+	}
+	return errors.New("Termux package did not provide a complete PlayIt daemon/CLI set")
+}
+
+func (a *app) installManagedPlayItAgent(logLine func(string)) error {
+	suffix, err := playItStandaloneAssetSuffix()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(a.playItManagedDaemonPath()), 0o755); err != nil {
+		return err
+	}
+	assets := []struct {
+		name   string
+		url    string
+		target string
+	}{
+		{name: "playitd", url: playItReleaseBaseURL + "/playit-linux-" + suffix, target: a.playItManagedDaemonPath()},
+		{name: "playit-cli", url: playItReleaseBaseURL + "/playit-cli-linux-" + suffix, target: a.playItManagedCLIPath()},
+	}
+	for _, asset := range assets {
+		if pathIsExecutable(asset.target) {
+			continue
+		}
+		if logLine != nil {
+			logLine("Downloading standalone " + asset.name)
+		}
+		if err := downloadFile(asset.url, asset.target); err != nil {
+			return err
+		}
+		if err := os.Chmod(asset.target, 0o700); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func playItStandaloneAssetSuffix() (string, error) {
+	switch runtime.GOARCH {
+	case "arm64":
+		return "aarch64", nil
+	case "arm":
+		return "armv7", nil
+	case "amd64":
+		return "amd64", nil
+	case "386":
+		return "i686", nil
+	default:
+		return "", fmt.Errorf("unsupported PlayIt standalone architecture: %s", runtime.GOARCH)
+	}
+}
+
+func (a *app) playItStandaloneAgentInstalled() bool {
+	return a.playItDaemonPath() != "" && a.playItCLIPath() != ""
+}
+
+func (a *app) playItPackagedAgentInstalled() bool {
+	return a.playItPackagedDaemonPath() != "" && a.playItPackagedCLIPath() != ""
+}
+
+func (a *app) playItManagedAgentInstalled() bool {
+	return pathIsExecutable(a.playItManagedDaemonPath()) && pathIsExecutable(a.playItManagedCLIPath())
+}
+
+func (a *app) playItPackagedDaemonPath() string {
+	return firstExecutablePath("playitd", "/data/data/com.termux/files/usr/bin/playitd")
+}
+
+func (a *app) playItPackagedCLIPath() string {
+	return firstExecutablePath("playit-cli", "/data/data/com.termux/files/usr/bin/playit-cli", "playit", "/data/data/com.termux/files/usr/bin/playit")
+}
+
+func (a *app) playItDaemonPath() string {
+	if path := a.playItPackagedDaemonPath(); path != "" {
+		return path
+	}
+	if pathIsExecutable(a.playItManagedDaemonPath()) {
+		return a.playItManagedDaemonPath()
+	}
+	return ""
+}
+
+func (a *app) playItCLIPath() string {
+	if path := a.playItPackagedCLIPath(); path != "" {
+		return path
+	}
+	if pathIsExecutable(a.playItManagedCLIPath()) {
+		return a.playItManagedCLIPath()
+	}
+	return ""
+}
+
+func shouldPreferPackagedPlayItAgent() bool {
+	if runtime.GOOS == "android" {
+		return true
+	}
+	prefix := strings.ToLower(filepath.ToSlash(os.Getenv("PREFIX")))
+	return strings.Contains(prefix, "com.termux") || termuxPkgPath() != ""
+}
+
+func termuxPkgPath() string {
+	return firstExecutablePath("pkg", "/data/data/com.termux/files/usr/bin/pkg")
+}
+
+func playItBinarySource(path string) string {
+	normalized := filepath.ToSlash(path)
+	switch {
+	case strings.Contains(normalized, "/data/data/com.termux/files/usr/bin/"):
+		return "Termux package"
+	case strings.Contains(normalized, "/playit/bin/"):
+		return "managed standalone binary"
+	case path != "":
+		return filepath.Base(path)
+	default:
+		return "unknown source"
+	}
 }
 
 func playItExecutablePath() string {
@@ -1762,6 +2578,29 @@ func playItExecutablePath() string {
 		}
 	}
 	return ""
+}
+
+func firstExecutablePath(candidates ...string) string {
+	for _, candidate := range candidates {
+		if strings.Contains(candidate, string(os.PathSeparator)) || strings.HasPrefix(candidate, "/") {
+			if pathIsExecutable(candidate) {
+				return candidate
+			}
+			continue
+		}
+		if path, err := exec.LookPath(candidate); err == nil && pathIsExecutable(path) {
+			return path
+		}
+	}
+	return ""
+}
+
+func pathIsExecutable(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func tailTextFile(path string, limit int) []string {
@@ -1840,10 +2679,18 @@ func (s *serverProcess) wait(cmd *exec.Cmd, done chan error) {
 	s.stopping = false
 	if err != nil {
 		s.lastError = err.Error()
-		s.appendLogLocked("Paper server stopped with error: " + err.Error())
+		s.appendLogLocked(s.runtimeLabelLocked() + " server stopped with error: " + err.Error())
 		return
 	}
-	s.appendLogLocked("Paper server stopped")
+	s.appendLogLocked(s.runtimeLabelLocked() + " server stopped")
+}
+
+func (s *serverProcess) runtimeLabelLocked() string {
+	runtimeName := strings.TrimSpace(s.runtime)
+	if runtimeName == "" {
+		return "Minecraft"
+	}
+	return runtimeName
 }
 
 func (s *serverProcess) appendLogLocked(line string) {
@@ -1857,6 +2704,24 @@ func (s *serverProcess) appendLogLocked(line string) {
 	if len(s.logs) > maxLogLines {
 		s.logs = s.logs[len(s.logs)-maxLogLines:]
 	}
+}
+
+func (s *serverProcess) logLinesSince(since time.Time) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []string{}
+	for _, line := range s.logs {
+		stamp, rest, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, stamp)
+		if err != nil || ts.Before(since) {
+			continue
+		}
+		out = append(out, rest)
+	}
+	return out
 }
 
 func (a *app) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -1908,26 +2773,36 @@ func (a *app) handleDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleServerOptions(w http.ResponseWriter, r *http.Request) {
-	versions, source, warning := minecraftVersionOptions(detectJavaMajor())
+	loader := strings.TrimSpace(r.URL.Query().Get("loader"))
+	if loader == "" {
+		loader = "paper"
+	}
+	versions, source, warning := minecraftVersionOptionsForLoader(loader, detectJavaMajor())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"minecraftVersions": versions,
 		"loaders":           loaderOptions(),
+		"loader":            loader,
 		"source":            source,
 		"warning":           warning,
 	})
 }
 
 func (a *app) handleMinecraftVersions(w http.ResponseWriter, r *http.Request) {
+	loader := strings.TrimSpace(r.URL.Query().Get("loader"))
+	if loader == "" {
+		loader = "paper"
+	}
 	javaMajor := detectJavaMajor()
 	if value := strings.TrimSpace(r.URL.Query().Get("javaMajor")); value != "" {
 		if parsed, err := strconv.Atoi(value); err == nil {
 			javaMajor = parsed
 		}
 	}
-	versions, source, warning := minecraftVersionOptions(javaMajor)
+	versions, source, warning := minecraftVersionOptionsForLoader(loader, javaMajor)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"versions":  versions,
 		"javaMajor": javaMajor,
+		"loader":    loader,
 		"source":    source,
 		"warning":   warning,
 	})
@@ -1961,6 +2836,8 @@ func (a *app) handleServersSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.playit.stop(5 * time.Second)
+	a.playit.reset()
+	a.server.clearTransientLogs()
 	if _, err := os.Stat(a.profilePathFor(id)); err != nil {
 		writeJSON(w, http.StatusNotFound, apiError{Error: "server profile not found"})
 		return
@@ -1985,6 +2862,8 @@ func (a *app) handleServersDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if id == activeID {
 		_ = a.playit.stop(5 * time.Second)
+		a.playit.reset()
+		a.server.clearTransientLogs()
 	}
 	dir := a.serverDir(id)
 	if _, err := os.Stat(dir); err != nil {
@@ -2201,9 +3080,6 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 		p.Crossplay.BedrockUDP = 19132
 	}
 	p.PlayIt = req.PlayIt
-	if !strings.EqualFold(p.Loader, "paper") {
-		p.PlayIt.Enabled = false
-	}
 	if p.Properties == nil {
 		p.Properties = map[string]string{}
 	}
@@ -2215,6 +3091,15 @@ func (a *app) handleServerSetup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 		return
+	}
+	if strings.TrimSpace(req.WorldUploadID) != "" {
+		a.appendSetupLog("Installing uploaded world")
+		if err := a.installSetupWorldUpload(requestedServerID, req.WorldUploadID); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+			return
+		}
+		p.Seed = ""
+		delete(p.Properties, "level-seed")
 	}
 	p.MinecraftVersion = resolvedVersion
 	a.server.mu.Lock()
@@ -2275,17 +3160,21 @@ func (a *app) installSetupAddons(p *profile, req setupRequest) {
 			projects = append(projects, "floodgate")
 		}
 	}
+	if strings.EqualFold(p.Loader, "fabric") && !setupProjectSelected(projects, "fabric-api") {
+		projects = append([]string{"fabric-api"}, projects...)
+		a.appendSetupLog("Fabric runtime selected; adding fabric-api.")
+	}
 	if req.PlayIt.Enabled && strings.EqualFold(p.Loader, "paper") {
 		if err := a.installPlayItPlugin(p); err != nil {
 			a.appendSetupLog("PlayIt plugin install failed: " + err.Error())
-			a.appendSetupLog("Standalone PlayIt agent can be used as fallback from the dashboard if needed.")
+			a.appendSetupLog("Standalone PlayIt agent can be started from the dashboard if needed.")
 		}
 		a.appendSetupLog("If PlayIt shows IPv6/control-channel errors on Android, set the PlayIt agent/tunnel to IPv4 only in the PlayIt dashboard.")
 		if req.Crossplay.Enabled {
 			a.appendSetupLog("PlayIt plugin handles Java TCP. Bedrock UDP needs a separate PlayIt agent/tunnel path.")
 		}
 	} else if req.PlayIt.Enabled {
-		a.appendSetupLog("PlayIt plugin setup skipped: the built-in plugin is currently available for Paper/Spigot-style servers.")
+		a.appendSetupLog("PlayIt enabled for " + p.Loader + "; MineMux will use the standalone PlayIt agent for this runtime.")
 	}
 	seen := map[string]bool{}
 	for _, project := range projects {
@@ -2299,6 +3188,58 @@ func (a *app) installSetupAddons(p *profile, req setupRequest) {
 			a.appendSetupLog("Add-on skipped: " + project + " - " + err.Error())
 		}
 	}
+}
+
+func setupProjectSelected(projects []string, needle string) bool {
+	needle = strings.ToLower(strings.TrimSpace(needle))
+	for _, project := range projects {
+		if strings.EqualFold(strings.TrimSpace(project), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *app) ensureFabricRuntimeDependenciesBeforeStart(p *profile) error {
+	if p == nil || !strings.EqualFold(p.Loader, "fabric") {
+		return nil
+	}
+	serverID := p.ID
+	if serverID == "" {
+		serverID = a.activeServerIDValue()
+	}
+	if serverModJarContains(a.serverDir(serverID), "fabric-api", "fabric_api") {
+		return nil
+	}
+	a.server.mu.Lock()
+	a.server.appendLogLocked("Fabric server is missing Fabric API; installing fabric-api before start.")
+	a.server.mu.Unlock()
+	if _, err := a.installModrinthProjectFor(serverID, p, "fabric-api", "", map[string]bool{}); err != nil {
+		return fmt.Errorf("Fabric API is required for MineMux Fabric servers, but MineMux could not install it automatically: %w", err)
+	}
+	a.server.mu.Lock()
+	a.server.appendLogLocked("Installed fabric-api for Fabric server.")
+	a.server.mu.Unlock()
+	return nil
+}
+
+func serverModJarContains(serverDir string, tokens ...string) bool {
+	entries, err := os.ReadDir(filepath.Join(serverDir, "mods"))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jar") {
+			continue
+		}
+		name := strings.ToLower(entry.Name())
+		for _, token := range tokens {
+			if token != "" && strings.Contains(name, strings.ToLower(token)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *app) installPlayItPlugin(p *profile) error {
@@ -2365,6 +3306,61 @@ func (a *app) handleServerSetupJarUpload(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]string{"customJarId": id, "fileName": name})
 }
 
+func (a *app) handleServerSetupWorldUpload(w http.ResponseWriter, r *http.Request) {
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "multipart field 'file' is required"})
+		return
+	}
+	defer file.Close()
+	name := filepath.Base(header.Filename)
+	if !strings.HasSuffix(strings.ToLower(name), ".zip") {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "world uploads must be .zip files"})
+		return
+	}
+	dir := filepath.Join(a.paths().Runtime, "setup-worlds")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	id := safeName(strings.TrimSuffix(name, filepath.Ext(name))) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
+	target := filepath.Join(dir, id+".zip")
+	out, err := os.Create(target)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, file); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"worldUploadId": id, "fileName": name})
+}
+
+func (a *app) installSetupWorldUpload(serverID, uploadID string) error {
+	uploadID = safeName(uploadID)
+	if uploadID == "" {
+		return errors.New("world upload id is required")
+	}
+	source := filepath.Join(a.paths().Runtime, "setup-worlds", uploadID+".zip")
+	if _, err := os.Stat(source); err != nil {
+		return errors.New("uploaded world is missing; upload it again")
+	}
+	serverDir := a.serverDir(serverID)
+	worldName := "world"
+	targetWorld := filepath.Join(serverDir, worldName)
+	if err := os.RemoveAll(targetWorld); err != nil {
+		return err
+	}
+	if err := unzipWorldArchive(source, serverDir, worldName); err != nil {
+		return err
+	}
+	_ = os.Remove(source)
+	a.appendSetupLog("Uploaded world installed as " + worldName)
+	return nil
+}
+
 func (a *app) handleServerStart(w http.ResponseWriter, r *http.Request) {
 	p, err := a.loadProfile()
 	if err != nil {
@@ -2388,6 +3384,7 @@ func (a *app) handleServerStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.playit.stop(5 * time.Second)
+	a.playit.reset()
 	writeJSON(w, http.StatusAccepted, a.server.status(a))
 }
 
@@ -2433,6 +3430,81 @@ func (a *app) handleServerCommand(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "sent"})
 }
 
+func (a *app) handleTermuxInfo(w http.ResponseWriter, r *http.Request) {
+	home, _ := os.UserHomeDir()
+	shell := termuxShell()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"home":  home,
+		"cwd":   home,
+		"shell": shell,
+		"path":  os.Getenv("PATH"),
+	})
+}
+
+func (a *app) handleTermuxCommand(w http.ResponseWriter, r *http.Request) {
+	var req termuxCommandRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
+		return
+	}
+	command := strings.TrimSpace(req.Command)
+	if command == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "command is required"})
+		return
+	}
+	home, _ := os.UserHomeDir()
+	cwd := strings.TrimSpace(req.Cwd)
+	if cwd == "" {
+		cwd = home
+	}
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		cwd = home
+	}
+	timeout := time.Duration(clampInt(req.TimeoutSeconds, 5, 120)) * time.Second
+	if req.TimeoutSeconds <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	started := time.Now()
+	cmd := exec.CommandContext(ctx, termuxShell(), "-lc", command)
+	cmd.Dir = cwd
+	cmd.Env = os.Environ()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			stderr.WriteString("\nCommand timed out after " + timeout.String())
+			exitCode = 124
+		}
+	}
+	writeJSON(w, http.StatusOK, termuxCommandResponse{
+		Command:    command,
+		Cwd:        cwd,
+		ExitCode:   exitCode,
+		Stdout:     stdout.String(),
+		Stderr:     stderr.String(),
+		DurationMS: time.Since(started).Milliseconds(),
+	})
+}
+
+func termuxShell() string {
+	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
+		return shell
+	}
+	if path, err := exec.LookPath("bash"); err == nil {
+		return path
+	}
+	return "sh"
+}
+
 func (a *app) handlePlayItAgentStart(w http.ResponseWriter, r *http.Request) {
 	p, err := a.loadProfile()
 	if err != nil {
@@ -2452,6 +3524,7 @@ func (a *app) handlePlayItAgentStop(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, apiError{Error: err.Error()})
 		return
 	}
+	a.playit.reset()
 	writeJSON(w, http.StatusAccepted, a.server.status(a))
 }
 
@@ -2596,29 +3669,80 @@ func (a *app) handleServerFileUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
+	headers := r.MultipartForm.File["file"]
+	if len(headers) == 0 {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "missing file upload"})
 		return
 	}
-	defer file.Close()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
-	target := filepath.Join(dir, filepath.Base(header.Filename))
-	out, err := os.Create(target)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
-		return
+	paths := []string{}
+	treeUpload := strings.TrimSpace(r.URL.Query().Get("tree")) == "1"
+	for _, header := range headers {
+		file, err := header.Open()
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+			return
+		}
+		relativeName := filepath.Base(header.Filename)
+		if treeUpload {
+			if safeRelative, ok := safeUploadRelativePath(header.Filename); ok {
+				relativeName = safeRelative
+			}
+		}
+		target := filepath.Join(dir, relativeName)
+		cleanDir := filepath.Clean(dir)
+		cleanTarget := filepath.Clean(target)
+		if cleanTarget != cleanDir && !strings.HasPrefix(cleanTarget, cleanDir+string(os.PathSeparator)) {
+			file.Close()
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "upload path escapes server directory"})
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(cleanTarget), 0o755); err != nil {
+			file.Close()
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		out, err := os.Create(cleanTarget)
+		if err != nil {
+			file.Close()
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		_, copyErr := io.Copy(out, file)
+		closeErr := out.Close()
+		file.Close()
+		if copyErr != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: copyErr.Error()})
+			return
+		}
+		if closeErr != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: closeErr.Error()})
+			return
+		}
+		root := a.serverDir(id)
+		paths = append(paths, filepath.ToSlash(strings.TrimPrefix(cleanTarget, root+string(os.PathSeparator))))
 	}
-	defer out.Close()
-	if _, err := io.Copy(out, file); err != nil {
-		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
-		return
+	status := "uploaded"
+	if len(paths) > 1 {
+		status = fmt.Sprintf("uploaded %d files", len(paths))
 	}
-	root := a.serverDir(id)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "uploaded", "path": filepath.ToSlash(strings.TrimPrefix(target, root+string(os.PathSeparator)))})
+	writeJSON(w, http.StatusOK, map[string]any{"status": status, "paths": paths, "path": firstString(paths)})
+}
+
+func safeUploadRelativePath(name string) (string, bool) {
+	name = filepath.ToSlash(strings.TrimSpace(name))
+	name = strings.TrimPrefix(name, "/")
+	if name == "" || strings.Contains(name, "\x00") {
+		return "", false
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(name)))
+	if cleaned == "." || strings.HasPrefix(cleaned, "../") || cleaned == ".." || filepath.IsAbs(cleaned) {
+		return "", false
+	}
+	return cleaned, true
 }
 
 func (a *app) safeServerPathFromRequest(r *http.Request) (string, string, error) {
@@ -2727,6 +3851,2483 @@ func (a *app) handleServerResourcePackUpload(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]string{"status": "uploaded", "sha1": sha})
 }
 
+func (a *app) handleUpdatesPlan(w http.ResponseWriter, r *http.Request) {
+	plan, err := a.updatePlanFor(serverIDFromRequest(a, r), "")
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (a *app) handleUpdatesApply(w http.ResponseWriter, r *http.Request) {
+	var req updateApplyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
+		return
+	}
+	id := serverIDFromRequest(a, r)
+	p, err := a.loadProfileFor(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
+		return
+	}
+	if id == a.activeServerIDValue() && a.server.status(a).Running {
+		writeJSON(w, http.StatusConflict, apiError{Error: "stop the server before applying updates"})
+		return
+	}
+	targetVersion := strings.TrimSpace(req.TargetMinecraftVersion)
+	if !req.UpdateMinecraft {
+		targetVersion = p.MinecraftVersion
+	}
+	plan, err := a.updatePlanFor(id, targetVersion)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+		return
+	}
+	if req.UpdateMods {
+		if missing := missingUpdateChoices(plan, req.ModChoices); len(missing) > 0 {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": "some add-ons need a choice before updating",
+				"mods":  missing,
+				"plan":  plan,
+			})
+			return
+		}
+	}
+
+	results := []updateApplyResult{}
+	backupID := ""
+	backupCreated := false
+	ensureBackup := func() error {
+		if backupCreated {
+			return nil
+		}
+		backup, err := a.createBackupFor(id, "before-update")
+		if err != nil {
+			return err
+		}
+		backupCreated = true
+		backupID = backup.ID
+		return nil
+	}
+
+	if req.UpdateMinecraft {
+		if plan.Minecraft.TargetVersion == "" {
+			writeJSON(w, http.StatusBadGateway, apiError{Error: "could not resolve a target Minecraft version"})
+			return
+		}
+		if err := ensureBackup(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: "restore point failed: " + err.Error()})
+			return
+		}
+		javaMajor := detectJavaMajor()
+		if javaMajor <= 0 {
+			javaMajor = p.JavaVersion
+		}
+		p.MinecraftVersion = plan.Minecraft.TargetVersion
+		if javaMajor > 0 {
+			p.JavaVersion = javaMajor
+		}
+		resolved, err := a.installServerRuntimeFor(id, p, javaMajor)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+			return
+		}
+		if resolved != "" {
+			p.MinecraftVersion = resolved
+		}
+		if err := a.saveProfileFor(id, p); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		if err := writeServerProperties(a.serverDir(id), p); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		if err := a.updateLockRuntime(id, p); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		results = append(results, updateApplyResult{
+			Name:    "Minecraft",
+			Action:  "updated",
+			Message: "Runtime refreshed for Minecraft " + p.MinecraftVersion,
+		})
+	}
+
+	if req.UpdateMods {
+		if refreshed, err := a.loadProfileFor(id); err == nil {
+			p = refreshed
+		}
+		modPlan, err := a.updatePlanFor(id, p.MinecraftVersion)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+			return
+		}
+		for _, mod := range modPlan.Mods {
+			choice := choiceForUpdateMod(req.ModChoices, mod)
+			if choice == "" {
+				if mod.UpdateAvailable {
+					choice = "update"
+				} else {
+					choice = "ignore"
+				}
+			}
+			switch choice {
+			case "update":
+				if !mod.UpdateAvailable || mod.TargetVersionID == "" || mod.ProjectID == "" {
+					results = append(results, updateApplyResult{Name: mod.CurrentName, FileName: mod.FileName, Action: "skipped", Message: "No compatible update is available"})
+					continue
+				}
+				if err := ensureBackup(); err != nil {
+					writeJSON(w, http.StatusInternalServerError, apiError{Error: "restore point failed: " + err.Error()})
+					return
+				}
+				if err := a.removeLockedInstall(id, mod, true); err != nil {
+					writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+					return
+				}
+				installed, err := a.installModrinthProjectFor(id, p, mod.ProjectID, mod.TargetVersionID, map[string]bool{})
+				if err != nil {
+					writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+					return
+				}
+				message := "Installed latest compatible version"
+				if len(installed) > 1 {
+					message = fmt.Sprintf("Installed %d add-ons including dependencies", len(installed))
+				}
+				results = append(results, updateApplyResult{Name: mod.CurrentName, FileName: mod.FileName, Action: "updated", Message: message})
+			case "disable":
+				if err := ensureBackup(); err != nil {
+					writeJSON(w, http.StatusInternalServerError, apiError{Error: "restore point failed: " + err.Error()})
+					return
+				}
+				if err := a.disableLockedInstall(id, mod); err != nil {
+					writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+					return
+				}
+				results = append(results, updateApplyResult{Name: mod.CurrentName, FileName: mod.FileName, Action: "disabled", Message: "Moved to disabled-addons"})
+			case "manual":
+				results = append(results, updateApplyResult{Name: mod.CurrentName, FileName: mod.FileName, Action: "manual", Message: "Left installed for manual replacement"})
+			default:
+				results = append(results, updateApplyResult{Name: mod.CurrentName, FileName: mod.FileName, Action: "ignored", Message: "Left unchanged"})
+			}
+		}
+	}
+
+	finalPlan, err := a.updatePlanFor(id, "")
+	if err != nil {
+		finalPlan = plan
+	}
+	writeJSON(w, http.StatusOK, updateApplyResponse{
+		ServerID: id,
+		BackupID: backupID,
+		Results:  results,
+		Plan:     finalPlan,
+	})
+}
+
+func (a *app) updatePlanFor(id, targetMinecraftVersion string) (updatePlanResponse, error) {
+	id = normalizeServerID(id)
+	p, err := a.loadProfileFor(id)
+	if err != nil {
+		return updatePlanResponse{}, errors.New("profile not found; run setup first")
+	}
+	javaMajor := detectJavaMajor()
+	if javaMajor <= 0 {
+		javaMajor = p.JavaVersion
+	}
+	target, source, warning := recommendedMinecraftUpdateTarget(p.Loader, javaMajor)
+	if strings.TrimSpace(targetMinecraftVersion) != "" {
+		target = strings.TrimSpace(targetMinecraftVersion)
+		source = "selected"
+	}
+	current := strings.TrimSpace(p.MinecraftVersion)
+	if current == "" {
+		current = "latest-compatible"
+	}
+	if target == "" {
+		target = current
+	}
+	targetProfile := *p
+	targetProfile.MinecraftVersion = target
+	runtimeRefresh := strings.TrimSpace(p.Loader) != "" && target != ""
+	plan := updatePlanResponse{
+		ServerID: id,
+		Minecraft: updateRuntimePlan{
+			CurrentVersion:          current,
+			TargetVersion:           target,
+			Loader:                  p.Loader,
+			Source:                  source,
+			Warning:                 warning,
+			UpdateAvailable:         !strings.EqualFold(current, target),
+			RuntimeRefreshAvailable: runtimeRefresh,
+			Message:                 "Runtime/build will be refreshed with the existing installer.",
+		},
+		Mods:         []updateModPlan{},
+		Blockers:     []updateModPlan{},
+		RequiresStop: id == a.activeServerIDValue() && a.server.status(a).Running,
+	}
+
+	lock, err := a.loadLockfileFor(id)
+	if err != nil {
+		lock = lockfile{MinecraftVersion: p.MinecraftVersion, Loader: p.Loader, Installed: []lockedInstall{}}
+	}
+	for _, installed := range lock.Installed {
+		if strings.TrimSpace(installed.FileName) == "" {
+			continue
+		}
+		mod := updateModPlan{
+			ProjectID:    installed.ProjectID,
+			VersionID:    installed.VersionID,
+			CurrentName:  firstNonEmpty(installed.Name, installed.FileName),
+			FileName:     installed.FileName,
+			TargetFolder: installed.TargetFolder,
+			Source:       installed.Source,
+			Status:       "current",
+		}
+		if !strings.EqualFold(installed.Source, "modrinth") || installed.ProjectID == "" {
+			mod.Status = "manual"
+			mod.Reason = "This add-on was not installed from Modrinth and cannot be checked automatically."
+			plan.Mods = append(plan.Mods, mod)
+			plan.Blockers = append(plan.Blockers, mod)
+			continue
+		}
+		version, err := resolveModrinthVersion(&targetProfile, installed.ProjectID, "")
+		if err != nil {
+			mod.Status = "unavailable"
+			mod.Reason = err.Error()
+			plan.Mods = append(plan.Mods, mod)
+			plan.Blockers = append(plan.Blockers, mod)
+			continue
+		}
+		file, err := primaryModrinthFile(version)
+		if err != nil {
+			mod.Status = "unavailable"
+			mod.Reason = err.Error()
+			plan.Mods = append(plan.Mods, mod)
+			plan.Blockers = append(plan.Blockers, mod)
+			continue
+		}
+		mod.TargetVersionID = version.ID
+		mod.TargetName = version.Name
+		mod.TargetFileName = filepath.Base(file.Filename)
+		mod.UpdateAvailable = installed.VersionID == "" || !strings.EqualFold(installed.VersionID, version.ID) || !strings.EqualFold(installed.FileName, mod.TargetFileName)
+		if mod.UpdateAvailable {
+			mod.Status = "available"
+		}
+		plan.Mods = append(plan.Mods, mod)
+	}
+	return plan, nil
+}
+
+func recommendedMinecraftUpdateTarget(loader string, javaMajor int) (string, string, string) {
+	options, source, warning := minecraftVersionOptionsForLoader(loader, javaMajor)
+	for _, option := range options {
+		if option.Recommended {
+			return option.ID, source, warning
+		}
+	}
+	if len(options) > 0 {
+		return options[0].ID, source, warning
+	}
+	return latestFallbackMinecraftVersion(javaMajor), "fallback", warning
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func missingUpdateChoices(plan updatePlanResponse, choices map[string]string) []string {
+	missing := []string{}
+	for _, mod := range plan.Mods {
+		if mod.Status != "unavailable" && mod.Status != "manual" {
+			continue
+		}
+		if _, ok := lookupUpdateChoice(choices, mod); ok {
+			continue
+		}
+		missing = append(missing, firstNonEmpty(mod.CurrentName, mod.FileName))
+	}
+	return missing
+}
+
+func choiceForUpdateMod(choices map[string]string, mod updateModPlan) string {
+	choice, ok := lookupUpdateChoice(choices, mod)
+	if !ok {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(choice)) {
+	case "update", "disable", "manual", "upload", "upload-manually":
+		if strings.EqualFold(choice, "upload") || strings.EqualFold(choice, "upload-manually") {
+			return "manual"
+		}
+		return strings.ToLower(strings.TrimSpace(choice))
+	default:
+		return "ignore"
+	}
+}
+
+func lookupUpdateChoice(choices map[string]string, mod updateModPlan) (string, bool) {
+	if len(choices) == 0 {
+		return "", false
+	}
+	keys := []string{mod.ProjectID, mod.FileName, mod.TargetFolder + "/" + mod.FileName}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if choice, ok := choices[key]; ok {
+			return choice, true
+		}
+	}
+	return "", false
+}
+
+func (a *app) updateLockRuntime(id string, p *profile) error {
+	lock, _ := a.loadLockfileFor(id)
+	lock.MinecraftVersion = p.MinecraftVersion
+	lock.Loader = p.Loader
+	return a.saveLockfileFor(id, lock)
+}
+
+func (a *app) removeLockedInstall(id string, mod updateModPlan, removeFile bool) error {
+	lock, _ := a.loadLockfileFor(id)
+	next := make([]lockedInstall, 0, len(lock.Installed))
+	for _, installed := range lock.Installed {
+		matched := installed.FileName == mod.FileName && installed.TargetFolder == mod.TargetFolder
+		if mod.ProjectID != "" && installed.ProjectID == mod.ProjectID {
+			matched = true
+		}
+		if !matched {
+			next = append(next, installed)
+			continue
+		}
+		if removeFile {
+			_ = os.Remove(filepath.Join(a.serverDir(id), installed.TargetFolder, installed.FileName))
+		}
+	}
+	lock.Installed = next
+	return a.saveLockfileFor(id, lock)
+}
+
+func (a *app) disableLockedInstall(id string, mod updateModPlan) error {
+	source := filepath.Join(a.serverDir(id), mod.TargetFolder, mod.FileName)
+	if _, err := os.Stat(source); err == nil {
+		disabledDir := filepath.Join(a.serverDir(id), "disabled-addons", mod.TargetFolder)
+		if err := os.MkdirAll(disabledDir, 0o755); err != nil {
+			return err
+		}
+		target := filepath.Join(disabledDir, mod.FileName)
+		if _, err := os.Stat(target); err == nil {
+			target = filepath.Join(disabledDir, strings.TrimSuffix(mod.FileName, filepath.Ext(mod.FileName))+"-"+time.Now().UTC().Format("20060102150405")+filepath.Ext(mod.FileName))
+		}
+		if err := os.Rename(source, target); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return a.removeLockedInstall(id, mod, false)
+}
+
+func (a *app) handleWorldMap(w http.ResponseWriter, r *http.Request) {
+	id := serverIDFromRequest(a, r)
+	p, err := a.loadProfileFor(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "server profile not found; run setup first"})
+		return
+	}
+	dimension := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("dimension")))
+	if dimension == "" {
+		dimension = "overworld"
+	}
+	if dimension != "overworld" && dimension != "nether" && dimension != "end" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "dimension must be overworld, nether, or end"})
+		return
+	}
+	detailRequested := queryBool(r, "detail")
+	limitMin := worldMapMinLimit
+	limitMax := worldMapMaxLimit
+	if detailRequested {
+		limitMin = 1
+		limitMax = worldMapDetailLimit
+	}
+	limit := clampInt(queryInt(r, "limit", worldMapDefaultLimit), limitMin, limitMax)
+	worldName := worldFolderName(p)
+	available := a.worldDimensions(id, worldName)
+	regionDir := a.worldRegionDir(id, worldName, dimension)
+	refs, err := collectWorldChunkRefs(regionDir)
+	if err != nil {
+		writeJSON(w, http.StatusOK, worldMapResponse{
+			ServerID:  id,
+			Dimension: dimension,
+			WorldName: worldName,
+			Available: available,
+			Chunks:    []worldMapChunk{},
+			Limit:     limit,
+			Mode:      "overview",
+			Warning:   err.Error(),
+		})
+		return
+	}
+	totalChunks := len(refs)
+	fullBounds := worldBoundsForRefs(refs)
+	viewportFiltered := false
+	if hasWorldMapViewport(r) {
+		minX := queryInt(r, "minX", 0)
+		maxX := queryInt(r, "maxX", 0)
+		minZ := queryInt(r, "minZ", 0)
+		maxZ := queryInt(r, "maxZ", 0)
+		if minX > maxX {
+			minX, maxX = maxX, minX
+		}
+		if minZ > maxZ {
+			minZ, maxZ = maxZ, minZ
+		}
+		filtered := refs[:0]
+		for _, ref := range refs {
+			if ref.ChunkX >= minX && ref.ChunkX <= maxX && ref.ChunkZ >= minZ && ref.ChunkZ <= maxZ {
+				filtered = append(filtered, ref)
+			}
+		}
+		refs = filtered
+		viewportFiltered = true
+	}
+	detail := detailRequested || limit <= worldMapDetailLimit
+	truncated := len(refs) > limit
+	if truncated {
+		if !viewportFiltered {
+			sortWorldChunkRefsBySpawn(refs)
+		}
+		refs = refs[:limit]
+	}
+	chunks := make([]worldMapChunk, 0, len(refs))
+	for _, ref := range refs {
+		chunk := worldMapChunk{X: ref.ChunkX, Z: ref.ChunkZ}
+		if detail {
+			chunk.Pixels = loadWorldChunkPixels(ref, dimension)
+		} else {
+			chunk.Color = overviewChunkColor(ref, dimension)
+		}
+		chunks = append(chunks, chunk)
+	}
+	warning := ""
+	if truncated {
+		if viewportFiltered {
+			warning = "Showing " + strconv.Itoa(limit) + " chunks from the visible area. Zoom in closer to load finer detail."
+		} else {
+			warning = "Showing nearest " + strconv.Itoa(limit) + " of " + strconv.Itoa(totalChunks) + " generated chunks."
+		}
+	}
+	mode := "overview"
+	if detail {
+		mode = "detail"
+	}
+	writeJSON(w, http.StatusOK, worldMapResponse{
+		ServerID:    id,
+		Dimension:   dimension,
+		WorldName:   worldName,
+		Available:   available,
+		Chunks:      chunks,
+		Bounds:      fullBounds,
+		Limit:       limit,
+		TotalChunks: totalChunks,
+		Mode:        mode,
+		Truncated:   truncated,
+		Warning:     warning,
+	})
+}
+
+func worldBoundsForRefs(refs []worldRegionChunkRef) worldMapBounds {
+	bounds := worldMapBounds{}
+	for index, ref := range refs {
+		if index == 0 || ref.ChunkX < bounds.MinX {
+			bounds.MinX = ref.ChunkX
+		}
+		if index == 0 || ref.ChunkX > bounds.MaxX {
+			bounds.MaxX = ref.ChunkX
+		}
+		if index == 0 || ref.ChunkZ < bounds.MinZ {
+			bounds.MinZ = ref.ChunkZ
+		}
+		if index == 0 || ref.ChunkZ > bounds.MaxZ {
+			bounds.MaxZ = ref.ChunkZ
+		}
+	}
+	return bounds
+}
+
+func queryBool(r *http.Request, key string) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasWorldMapViewport(r *http.Request) bool {
+	query := r.URL.Query()
+	for _, key := range []string{"minX", "maxX", "minZ", "maxZ"} {
+		if strings.TrimSpace(query.Get(key)) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *app) handleWorldPlayers(w http.ResponseWriter, r *http.Request) {
+	status := a.server.status(a)
+	if !status.Running || !status.Ready {
+		writeJSON(w, http.StatusOK, worldPlayersResponse{
+			Online:      0,
+			Players:     []worldPlayerMarker{},
+			RefreshedAt: time.Now().UTC(),
+		})
+		return
+	}
+	names := playersFromLogs(a.mergedServerLogLines(maxLogLines))
+	markers := make([]worldPlayerMarker, 0, len(names))
+	if len(names) == 0 {
+		writeJSON(w, http.StatusOK, worldPlayersResponse{
+			Online:      0,
+			Players:     markers,
+			RefreshedAt: time.Now().UTC(),
+		})
+		return
+	}
+	started := time.Now().UTC()
+	for _, name := range names {
+		if !validMinecraftPlayerName(name) {
+			continue
+		}
+		_ = a.server.send("data get entity " + name + " Pos")
+		_ = a.server.send("data get entity " + name + " Dimension")
+	}
+	deadline := time.Now().Add(1400 * time.Millisecond)
+	parsed := map[string]*worldPlayerMarker{}
+	for time.Now().Before(deadline) {
+		lines := a.server.logLinesSince(started)
+		for _, line := range lines {
+			parseWorldPlayerDataLine(line, parsed)
+		}
+		complete := 0
+		for _, name := range names {
+			if marker := parsed[name]; marker != nil && marker.Available && marker.Dimension != "" {
+				complete++
+			}
+		}
+		if complete >= len(names) {
+			break
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+	for _, name := range names {
+		marker := worldPlayerMarker{Name: name, Available: false, Error: "Position unavailable"}
+		if parsedMarker := parsed[name]; parsedMarker != nil {
+			marker = *parsedMarker
+			marker.Name = name
+			if marker.Available {
+				marker.ChunkX = floorDivFloat(marker.X, 16)
+				marker.ChunkZ = floorDivFloat(marker.Z, 16)
+				marker.Error = ""
+			}
+			if marker.Dimension == "" {
+				marker.Dimension = "overworld"
+			}
+		}
+		markers = append(markers, marker)
+	}
+	writeJSON(w, http.StatusOK, worldPlayersResponse{
+		Online:      len(markers),
+		Players:     markers,
+		RefreshedAt: time.Now().UTC(),
+	})
+}
+
+func validMinecraftPlayerName(name string) bool {
+	if name == "" || len(name) > 16 {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func parseWorldPlayerDataLine(line string, markers map[string]*worldPlayerMarker) {
+	if !strings.Contains(line, " has the following entity data:") {
+		return
+	}
+	prefix, data, ok := strings.Cut(line, " has the following entity data:")
+	if !ok {
+		return
+	}
+	fields := strings.Fields(strings.TrimSpace(prefix))
+	if len(fields) == 0 {
+		return
+	}
+	name := fields[len(fields)-1]
+	if !validMinecraftPlayerName(name) {
+		return
+	}
+	marker := markers[name]
+	if marker == nil {
+		marker = &worldPlayerMarker{Name: name}
+		markers[name] = marker
+	}
+	data = strings.TrimSpace(data)
+	if x, y, z, ok := parseMinecraftPosData(data); ok {
+		marker.X = x
+		marker.Y = y
+		marker.Z = z
+		marker.Available = true
+		return
+	}
+	if dimension := normalizeMinecraftDimension(data); dimension != "" {
+		marker.Dimension = dimension
+	}
+}
+
+func parseMinecraftPosData(data string) (float64, float64, float64, bool) {
+	re := regexp.MustCompile(`\[\s*([-+]?[0-9]+(?:\.[0-9]+)?)[dDfF]?\s*,\s*([-+]?[0-9]+(?:\.[0-9]+)?)[dDfF]?\s*,\s*([-+]?[0-9]+(?:\.[0-9]+)?)[dDfF]?\s*\]`)
+	match := re.FindStringSubmatch(data)
+	if len(match) != 4 {
+		return 0, 0, 0, false
+	}
+	x, errX := strconv.ParseFloat(match[1], 64)
+	y, errY := strconv.ParseFloat(match[2], 64)
+	z, errZ := strconv.ParseFloat(match[3], 64)
+	return x, y, z, errX == nil && errY == nil && errZ == nil
+}
+
+func normalizeMinecraftDimension(data string) string {
+	lower := strings.ToLower(data)
+	switch {
+	case strings.Contains(lower, "minecraft:the_nether") || strings.Contains(lower, "the_nether"):
+		return "nether"
+	case strings.Contains(lower, "minecraft:the_end") || strings.Contains(lower, "the_end"):
+		return "end"
+	case strings.Contains(lower, "minecraft:overworld") || strings.Contains(lower, "overworld"):
+		return "overworld"
+	default:
+		return ""
+	}
+}
+
+func floorDivFloat(value float64, divisor int) int {
+	return int(math.Floor(value / float64(divisor)))
+}
+
+func sortWorldChunkRefsBySpawn(refs []worldRegionChunkRef) {
+	sort.Slice(refs, func(i, j int) bool {
+		di := refs[i].ChunkX*refs[i].ChunkX + refs[i].ChunkZ*refs[i].ChunkZ
+		dj := refs[j].ChunkX*refs[j].ChunkX + refs[j].ChunkZ*refs[j].ChunkZ
+		if di != dj {
+			return di < dj
+		}
+		if refs[i].ChunkZ != refs[j].ChunkZ {
+			return refs[i].ChunkZ < refs[j].ChunkZ
+		}
+		return refs[i].ChunkX < refs[j].ChunkX
+	})
+}
+
+func (a *app) handleWorldTrim(w http.ResponseWriter, r *http.Request) {
+	id := serverIDFromRequest(a, r)
+	p, err := a.loadProfileFor(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "server profile not found; run setup first"})
+		return
+	}
+	if id == a.activeServerIDValue() && a.server.status(a).Running {
+		writeJSON(w, http.StatusConflict, apiError{Error: "stop the server before trimming the world"})
+		return
+	}
+	var req worldTrimRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
+		return
+	}
+	dimension := strings.ToLower(strings.TrimSpace(req.Dimension))
+	if dimension == "" {
+		dimension = "overworld"
+	}
+	if dimension != "overworld" && dimension != "nether" && dimension != "end" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "dimension must be overworld, nether, or end"})
+		return
+	}
+	areas, err := normalizeWorldTrimAreas(req.Areas)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	worldName := worldFolderName(p)
+	regionDir := a.worldRegionDir(id, worldName, dimension)
+	refs, err := collectWorldChunkRefs(regionDir)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: err.Error()})
+		return
+	}
+	stats := worldTrimPreview(refs, areas)
+	if stats.KeptChunks == 0 {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "selected keep areas do not include any generated chunks"})
+		return
+	}
+	backup, err := a.createBackupFor(id, "before-world-trim")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: "restore point failed: " + err.Error()})
+		return
+	}
+	stats, err = trimWorldRegions(refs, areas)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, worldTrimResponse{
+		ServerID:             id,
+		Dimension:            dimension,
+		WorldName:            worldName,
+		BackupID:             backup.ID,
+		BeforeChunks:         stats.BeforeChunks,
+		KeptChunks:           stats.KeptChunks,
+		DeletedChunks:        stats.DeletedChunks,
+		RegionFilesRemoved:   stats.RegionFilesRemoved,
+		RegionFilesCompacted: stats.RegionFilesCompacted,
+	})
+}
+
+func (a *app) handleWorldModsScan(w http.ResponseWriter, r *http.Request) {
+	a.handleWorldModsScanOrCleanup(w, r, false)
+}
+
+func (a *app) handleWorldModsCleanup(w http.ResponseWriter, r *http.Request) {
+	a.handleWorldModsScanOrCleanup(w, r, true)
+}
+
+func (a *app) handleWorldModsScanOrCleanup(w http.ResponseWriter, r *http.Request, cleanup bool) {
+	id := serverIDFromRequest(a, r)
+	p, err := a.loadProfileFor(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "server profile not found; run setup first"})
+		return
+	}
+	if cleanup && id == a.activeServerIDValue() && a.server.status(a).Running {
+		writeJSON(w, http.StatusConflict, apiError{Error: "stop the server before cleaning mod blocks from the world"})
+		return
+	}
+	var req modWorldScanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
+		return
+	}
+	namespaces, namespaceSet, err := normalizeModNamespaces(req.Namespaces)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	dimensions, err := normalizeWorldDimensions(req.Dimensions)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	worldName := worldFolderName(p)
+	response := modWorldScanResponse{
+		ServerID:   id,
+		WorldName:  worldName,
+		Namespaces: namespaces,
+		Dimensions: []modWorldDimensionReport{},
+		Cleaned:    cleanup,
+	}
+	if cleanup {
+		preview, err := a.scanWorldModRefs(id, worldName, dimensions, namespaceSet, false)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		if preview.TotalBlocks+preview.TotalBlockEntities+preview.TotalEntities == 0 {
+			writeJSON(w, http.StatusOK, preview)
+			return
+		}
+		backup, err := a.createBackupFor(id, "before-mod-world-cleanup")
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: "restore point failed: " + err.Error()})
+			return
+		}
+		response.BackupID = backup.ID
+	}
+	scanned, err := a.scanWorldModRefs(id, worldName, dimensions, namespaceSet, cleanup)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	scanned.BackupID = response.BackupID
+	scanned.Cleaned = cleanup
+	writeJSON(w, http.StatusOK, scanned)
+}
+
+func (a *app) scanWorldModRefs(serverID, worldName string, dimensions []string, namespaces map[string]bool, cleanup bool) (modWorldScanResponse, error) {
+	response := modWorldScanResponse{
+		ServerID:   serverID,
+		WorldName:  worldName,
+		Namespaces: sortedNamespaceKeys(namespaces),
+		Dimensions: []modWorldDimensionReport{},
+		Cleaned:    cleanup,
+	}
+	for _, dimension := range dimensions {
+		report, err := scanWorldModDimension(a.worldRegionDir(serverID, worldName, dimension), dimension, namespaces, cleanup)
+		if err != nil && report.Warning == "" {
+			report.Warning = err.Error()
+		}
+		response.Dimensions = append(response.Dimensions, report)
+		response.TotalChunksScanned += report.ChunksScanned
+		response.TotalChunksMatched += report.ChunksMatched
+		response.TotalBlocks += report.Blocks
+		response.TotalBlockEntities += report.BlockEntities
+		response.TotalEntities += report.Entities
+	}
+	return response, nil
+}
+
+func scanWorldModDimension(regionDir, dimension string, namespaces map[string]bool, cleanup bool) (modWorldDimensionReport, error) {
+	report := modWorldDimensionReport{Dimension: dimension}
+	entries, err := os.ReadDir(regionDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			report.Warning = "dimension has no generated region files"
+			return report, nil
+		}
+		return report, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "r.") || !strings.HasSuffix(entry.Name(), ".mca") {
+			continue
+		}
+		report.RegionFiles++
+		path := filepath.Join(regionDir, entry.Name())
+		regionReport, changed, err := scanRegionModRefs(path, namespaces, cleanup)
+		if err != nil {
+			if report.Warning == "" {
+				report.Warning = err.Error()
+			}
+			continue
+		}
+		report.ChunksScanned += regionReport.ChunksScanned
+		report.ChunksMatched += regionReport.ChunksMatched
+		report.ChunksCleaned += regionReport.ChunksCleaned
+		report.Blocks += regionReport.Blocks
+		report.BlockEntities += regionReport.BlockEntities
+		report.Entities += regionReport.Entities
+		if changed {
+			report.RegionFilesChanged++
+		}
+	}
+	return report, nil
+}
+
+func scanRegionModRefs(path string, namespaces map[string]bool, cleanup bool) (modWorldDimensionReport, bool, error) {
+	rawChunks, timestamps, err := readRegionRawChunks(path)
+	if err != nil {
+		return modWorldDimensionReport{}, false, err
+	}
+	report := modWorldDimensionReport{}
+	changed := false
+	for index, raw := range rawChunks {
+		payload, err := decodeRegionRawChunk(raw)
+		if err != nil {
+			continue
+		}
+		root, err := readNBTTree(payload)
+		if err != nil {
+			continue
+		}
+		chunkReport := scanNBTModRefs(root, namespaces, cleanup)
+		report.ChunksScanned++
+		if chunkReport.Blocks+chunkReport.BlockEntities+chunkReport.Entities > 0 {
+			report.ChunksMatched++
+		}
+		report.Blocks += chunkReport.Blocks
+		report.BlockEntities += chunkReport.BlockEntities
+		report.Entities += chunkReport.Entities
+		if cleanup && chunkReport.Changed {
+			nextPayload, err := writeNBTTree(root)
+			if err != nil {
+				return report, changed, err
+			}
+			nextRaw, err := encodeRegionRawChunk(nextPayload)
+			if err != nil {
+				return report, changed, err
+			}
+			rawChunks[index] = nextRaw
+			report.ChunksCleaned++
+			changed = true
+		}
+	}
+	if cleanup && changed {
+		if err := writeRegionRawChunks(path, rawChunks, timestamps); err != nil {
+			return report, changed, err
+		}
+	}
+	return report, changed, nil
+}
+
+func normalizeModNamespaces(input []string) ([]string, map[string]bool, error) {
+	set := map[string]bool{}
+	for _, raw := range input {
+		for _, part := range strings.Split(raw, ",") {
+			value := strings.ToLower(strings.TrimSpace(part))
+			value = strings.TrimSuffix(value, ":")
+			if strings.Contains(value, ":") {
+				value = strings.SplitN(value, ":", 2)[0]
+			}
+			if value == "" {
+				continue
+			}
+			if value == "minecraft" {
+				return nil, nil, errors.New("minecraft namespace cannot be cleaned")
+			}
+			if !regexp.MustCompile(`^[a-z0-9_.-]+$`).MatchString(value) {
+				return nil, nil, fmt.Errorf("invalid mod namespace: %s", value)
+			}
+			set[value] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil, nil, errors.New("at least one mod namespace is required")
+	}
+	return sortedNamespaceKeys(set), set, nil
+}
+
+func sortedNamespaceKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func normalizeWorldDimensions(input []string) ([]string, error) {
+	if len(input) == 0 {
+		return []string{"overworld", "nether", "end"}, nil
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, value := range input {
+		dimension := strings.ToLower(strings.TrimSpace(value))
+		if dimension == "" {
+			continue
+		}
+		if dimension != "overworld" && dimension != "nether" && dimension != "end" {
+			return nil, errors.New("dimension must be overworld, nether, or end")
+		}
+		if !seen[dimension] {
+			out = append(out, dimension)
+			seen[dimension] = true
+		}
+	}
+	if len(out) == 0 {
+		return []string{"overworld", "nether", "end"}, nil
+	}
+	return out, nil
+}
+
+func normalizeWorldTrimAreas(input []worldTrimArea) ([]worldTrimArea, error) {
+	if len(input) == 0 {
+		return nil, errors.New("at least one keep area is required")
+	}
+	if len(input) > 64 {
+		return nil, errors.New("too many keep areas; use 64 or fewer")
+	}
+	areas := make([]worldTrimArea, 0, len(input))
+	for _, area := range input {
+		if area.MinChunkX > area.MaxChunkX {
+			area.MinChunkX, area.MaxChunkX = area.MaxChunkX, area.MinChunkX
+		}
+		if area.MinChunkZ > area.MaxChunkZ {
+			area.MinChunkZ, area.MaxChunkZ = area.MaxChunkZ, area.MinChunkZ
+		}
+		if area.MaxChunkX-area.MinChunkX > 4096 || area.MaxChunkZ-area.MinChunkZ > 4096 {
+			return nil, errors.New("keep area is too large")
+		}
+		areas = append(areas, area)
+	}
+	return areas, nil
+}
+
+func worldTrimPreview(refs []worldRegionChunkRef, areas []worldTrimArea) worldTrimStats {
+	stats := worldTrimStats{BeforeChunks: len(refs)}
+	for _, ref := range refs {
+		if chunkInTrimAreas(ref.ChunkX, ref.ChunkZ, areas) {
+			stats.KeptChunks++
+		}
+	}
+	stats.DeletedChunks = stats.BeforeChunks - stats.KeptChunks
+	return stats
+}
+
+func trimWorldRegions(refs []worldRegionChunkRef, areas []worldTrimArea) (worldTrimStats, error) {
+	stats := worldTrimPreview(refs, areas)
+	if stats.KeptChunks == 0 {
+		return stats, errors.New("selected keep areas do not include any generated chunks")
+	}
+	grouped := map[string][]worldRegionChunkRef{}
+	for _, ref := range refs {
+		grouped[ref.RegionPath] = append(grouped[ref.RegionPath], ref)
+	}
+	for path, regionRefs := range grouped {
+		keep := map[int]bool{}
+		for _, ref := range regionRefs {
+			if !chunkInTrimAreas(ref.ChunkX, ref.ChunkZ, areas) {
+				continue
+			}
+			keep[ref.LocalX+ref.LocalZ*32] = true
+		}
+		switch {
+		case len(keep) == len(regionRefs):
+			continue
+		case len(keep) == 0:
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return stats, err
+			}
+			stats.RegionFilesRemoved++
+		default:
+			if err := compactRegionFile(path, keep); err != nil {
+				return stats, err
+			}
+			stats.RegionFilesCompacted++
+		}
+	}
+	return stats, nil
+}
+
+func chunkInTrimAreas(chunkX, chunkZ int, areas []worldTrimArea) bool {
+	for _, area := range areas {
+		if chunkX >= area.MinChunkX && chunkX <= area.MaxChunkX && chunkZ >= area.MinChunkZ && chunkZ <= area.MaxChunkZ {
+			return true
+		}
+	}
+	return false
+}
+
+func compactRegionFile(path string, keep map[int]bool) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if len(data) < 8192 {
+		return fmt.Errorf("region file %s is too small", filepath.Base(path))
+	}
+	next := make([]byte, 8192)
+	for index := 0; index < 1024; index++ {
+		if !keep[index] {
+			continue
+		}
+		location := binary.BigEndian.Uint32(data[index*4 : index*4+4])
+		offset := int(location >> 8)
+		sectors := int(location & 0xff)
+		if offset < 2 || sectors <= 0 {
+			continue
+		}
+		start := offset * 4096
+		end := start + sectors*4096
+		if start < 0 || start >= len(data) || end > len(data) {
+			return fmt.Errorf("region file %s has an invalid chunk offset", filepath.Base(path))
+		}
+		raw := data[start:end]
+		needed := len(raw)
+		if len(raw) >= 5 {
+			length := int(binary.BigEndian.Uint32(raw[:4]))
+			if length > 0 && length+4 <= len(raw) {
+				needed = alignToSector(length + 4)
+			}
+		}
+		if needed <= 0 {
+			continue
+		}
+		newSectors := needed / 4096
+		if newSectors > 255 {
+			return fmt.Errorf("chunk in %s is too large to compact safely", filepath.Base(path))
+		}
+		payload := make([]byte, needed)
+		copy(payload, raw[:minInt(needed, len(raw))])
+		newOffset := len(next) / 4096
+		binary.BigEndian.PutUint32(next[index*4:index*4+4], uint32(newOffset<<8|newSectors))
+		copy(next[4096+index*4:4096+index*4+4], data[4096+index*4:4096+index*4+4])
+		next = append(next, payload...)
+	}
+	if len(next) == 8192 {
+		return fmt.Errorf("region file %s would be empty after compacting", filepath.Base(path))
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".trim-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(next); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	backupPath := path + ".before-trim-" + time.Now().UTC().Format("20060102150405")
+	if err := os.Rename(path, backupPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Rename(backupPath, path)
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = os.Remove(backupPath)
+	return nil
+}
+
+func alignToSector(size int) int {
+	if size <= 0 {
+		return 0
+	}
+	if size%4096 == 0 {
+		return size
+	}
+	return (size/4096 + 1) * 4096
+}
+
+func worldFolderName(p *profile) string {
+	if p != nil && p.Properties != nil {
+		if value := strings.TrimSpace(p.Properties["level-name"]); value != "" {
+			clean := filepath.Base(filepath.Clean(value))
+			if clean != "." && clean != string(os.PathSeparator) && clean != "" {
+				return clean
+			}
+		}
+	}
+	return "world"
+}
+
+func (a *app) worldDimensions(serverID, worldName string) []worldDimensionInfo {
+	dimensions := []worldDimensionInfo{
+		{ID: "overworld", Name: "Overworld"},
+		{ID: "nether", Name: "Nether"},
+		{ID: "end", Name: "End"},
+	}
+	for i := range dimensions {
+		dir := a.worldRegionDir(serverID, worldName, dimensions[i].ID)
+		count := countRegionFiles(dir)
+		dimensions[i].Available = count > 0
+		dimensions[i].RegionFiles = count
+	}
+	return dimensions
+}
+
+func (a *app) worldRegionDir(serverID, worldName, dimension string) string {
+	worldRoot := filepath.Join(a.serverDir(serverID), worldName)
+	candidates := []string{}
+	switch dimension {
+	case "nether":
+		candidates = append(candidates,
+			filepath.Join(worldRoot, "DIM-1", "region"),
+			filepath.Join(worldRoot, "dimensions", "minecraft", "the_nether", "region"),
+		)
+	case "end":
+		candidates = append(candidates,
+			filepath.Join(worldRoot, "DIM1", "region"),
+			filepath.Join(worldRoot, "dimensions", "minecraft", "the_end", "region"),
+		)
+	default:
+		candidates = append(candidates,
+			filepath.Join(worldRoot, "region"),
+			filepath.Join(worldRoot, "dimensions", "minecraft", "overworld", "region"),
+		)
+	}
+	for _, dir := range candidates {
+		if countRegionFiles(dir) > 0 {
+			return dir
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return filepath.Join(worldRoot, "region")
+}
+
+func countRegionFiles(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".mca") {
+			count++
+		}
+	}
+	return count
+}
+
+func collectWorldChunkRefs(regionDir string) ([]worldRegionChunkRef, error) {
+	entries, err := os.ReadDir(regionDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, errors.New("no generated region files found for this dimension")
+		}
+		return nil, err
+	}
+	refs := []worldRegionChunkRef{}
+	header := make([]byte, 4096)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "r.") || !strings.HasSuffix(entry.Name(), ".mca") {
+			continue
+		}
+		rx, rz, ok := parseRegionFileName(entry.Name())
+		if !ok {
+			continue
+		}
+		path := filepath.Join(regionDir, entry.Name())
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		if _, err := io.ReadFull(file, header); err != nil {
+			_ = file.Close()
+			continue
+		}
+		_ = file.Close()
+		for localZ := 0; localZ < 32; localZ++ {
+			for localX := 0; localX < 32; localX++ {
+				index := localX + localZ*32
+				offset := binary.BigEndian.Uint32(header[index*4 : index*4+4])
+				if offset>>8 == 0 {
+					continue
+				}
+				refs = append(refs, worldRegionChunkRef{
+					RegionPath: path,
+					RegionX:    rx,
+					RegionZ:    rz,
+					LocalX:     localX,
+					LocalZ:     localZ,
+					ChunkX:     rx*32 + localX,
+					ChunkZ:     rz*32 + localZ,
+				})
+			}
+		}
+	}
+	if len(refs) == 0 {
+		return nil, errors.New("no generated chunks found for this dimension")
+	}
+	return refs, nil
+}
+
+func parseRegionFileName(name string) (int, int, bool) {
+	name = strings.TrimSuffix(strings.TrimPrefix(name, "r."), ".mca")
+	parts := strings.Split(name, ".")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	x, errX := strconv.Atoi(parts[0])
+	z, errZ := strconv.Atoi(parts[1])
+	return x, z, errX == nil && errZ == nil
+}
+
+func loadWorldChunkPixels(ref worldRegionChunkRef, dimension string) []string {
+	fallback := fallbackChunkPixels(dimension)
+	payload, err := readRegionChunkPayload(ref)
+	if err != nil {
+		return fallback
+	}
+	root, err := readNBTCompound(payload)
+	if err != nil {
+		return fallback
+	}
+	pixels, err := chunkSurfacePixels(root, dimension)
+	if err != nil {
+		return fallback
+	}
+	return pixels
+}
+
+func readRegionChunkPayload(ref worldRegionChunkRef) ([]byte, error) {
+	file, err := os.Open(ref.RegionPath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	header := make([]byte, 4096)
+	if _, err := io.ReadFull(file, header); err != nil {
+		return nil, err
+	}
+	index := ref.LocalX + ref.LocalZ*32
+	location := binary.BigEndian.Uint32(header[index*4 : index*4+4])
+	sector := int64(location >> 8)
+	if sector == 0 {
+		return nil, errors.New("chunk is not generated")
+	}
+	if _, err := file.Seek(sector*4096, io.SeekStart); err != nil {
+		return nil, err
+	}
+	var lengthBytes [4]byte
+	if _, err := io.ReadFull(file, lengthBytes[:]); err != nil {
+		return nil, err
+	}
+	length := int(binary.BigEndian.Uint32(lengthBytes[:]))
+	if length <= 1 || length > 16*1024*1024 {
+		return nil, errors.New("invalid chunk length")
+	}
+	compression := make([]byte, 1)
+	if _, err := io.ReadFull(file, compression); err != nil {
+		return nil, err
+	}
+	compressed := make([]byte, length-1)
+	if _, err := io.ReadFull(file, compressed); err != nil {
+		return nil, err
+	}
+	var reader io.ReadCloser
+	switch compression[0] {
+	case 1:
+		reader, err = gzip.NewReader(bytes.NewReader(compressed))
+	case 2:
+		reader, err = zlib.NewReader(bytes.NewReader(compressed))
+	case 3:
+		return compressed, nil
+	default:
+		return nil, errors.New("unsupported chunk compression")
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+func readRegionRawChunks(path string) (map[int][]byte, []byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(data) < 8192 {
+		return nil, nil, fmt.Errorf("region file %s is too small", filepath.Base(path))
+	}
+	timestamps := append([]byte(nil), data[4096:8192]...)
+	chunks := map[int][]byte{}
+	for index := 0; index < 1024; index++ {
+		location := binary.BigEndian.Uint32(data[index*4 : index*4+4])
+		offset := int(location >> 8)
+		sectors := int(location & 0xff)
+		if offset == 0 || sectors == 0 {
+			continue
+		}
+		start := offset * 4096
+		end := start + sectors*4096
+		if start < 0 || start >= len(data) || end > len(data) {
+			continue
+		}
+		raw := data[start:end]
+		if len(raw) >= 4 {
+			length := int(binary.BigEndian.Uint32(raw[:4]))
+			if length > 0 && length+4 <= len(raw) {
+				raw = raw[:alignToSector(length+4)]
+			}
+		}
+		chunks[index] = append([]byte(nil), raw...)
+	}
+	return chunks, timestamps, nil
+}
+
+func writeRegionRawChunks(path string, chunks map[int][]byte, timestamps []byte) error {
+	next := make([]byte, 8192)
+	if len(timestamps) >= 4096 {
+		copy(next[4096:8192], timestamps[:4096])
+	}
+	indexes := make([]int, 0, len(chunks))
+	for index := range chunks {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	for _, index := range indexes {
+		raw := chunks[index]
+		if len(raw) == 0 {
+			continue
+		}
+		needed := alignToSector(len(raw))
+		payload := make([]byte, needed)
+		copy(payload, raw)
+		sectors := len(payload) / 4096
+		if sectors > 255 {
+			return fmt.Errorf("chunk in %s is too large to write safely", filepath.Base(path))
+		}
+		offset := len(next) / 4096
+		binary.BigEndian.PutUint32(next[index*4:index*4+4], uint32(offset<<8|sectors))
+		next = append(next, payload...)
+	}
+	if len(next) == 8192 {
+		return fmt.Errorf("region file %s would be empty after cleanup", filepath.Base(path))
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".rewrite-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(next); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	backupPath := path + ".before-mod-cleanup-" + time.Now().UTC().Format("20060102150405")
+	if err := os.Rename(path, backupPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Rename(backupPath, path)
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = os.Remove(backupPath)
+	return nil
+}
+
+func decodeRegionRawChunk(raw []byte) ([]byte, error) {
+	if len(raw) < 5 {
+		return nil, errors.New("raw chunk is too small")
+	}
+	length := int(binary.BigEndian.Uint32(raw[:4]))
+	if length <= 1 || length+4 > len(raw) {
+		return nil, errors.New("invalid raw chunk length")
+	}
+	compression := raw[4]
+	compressed := raw[5 : 4+length]
+	var reader io.ReadCloser
+	var err error
+	switch compression {
+	case 1:
+		reader, err = gzip.NewReader(bytes.NewReader(compressed))
+	case 2:
+		reader, err = zlib.NewReader(bytes.NewReader(compressed))
+	case 3:
+		return append([]byte(nil), compressed...), nil
+	default:
+		return nil, errors.New("unsupported chunk compression")
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+func encodeRegionRawChunk(payload []byte) ([]byte, error) {
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(payload); err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	length := compressed.Len() + 1
+	total := alignToSector(length + 4)
+	raw := make([]byte, total)
+	binary.BigEndian.PutUint32(raw[:4], uint32(length))
+	raw[4] = 2
+	copy(raw[5:], compressed.Bytes())
+	return raw, nil
+}
+
+func scanNBTModRefs(root *nbtTreeTag, namespaces map[string]bool, cleanup bool) modWorldChunkReport {
+	report := modWorldChunkReport{}
+	data := nbtChunkData(root)
+	if data == nil {
+		return report
+	}
+	report.Blocks += scanSectionModBlocks(data, namespaces, cleanup, &report)
+	report.BlockEntities += scanAndMaybeRemoveNamedList(data, namespaces, cleanup, &report, "block_entities", "TileEntities")
+	report.Entities += scanAndMaybeRemoveNamedList(data, namespaces, cleanup, &report, "entities", "Entities")
+	return report
+}
+
+func nbtChunkData(root *nbtTreeTag) *nbtTreeTag {
+	if root == nil || root.Type != 10 {
+		return nil
+	}
+	if level := nbtCompoundChild(root, "Level"); level != nil && level.Type == 10 {
+		return level
+	}
+	if data := nbtCompoundChild(root, "Data"); data != nil && data.Type == 10 {
+		return data
+	}
+	return root
+}
+
+func scanSectionModBlocks(data *nbtTreeTag, namespaces map[string]bool, cleanup bool, report *modWorldChunkReport) int {
+	sections := nbtCompoundChild(data, "sections", "Sections")
+	if sections == nil || sections.Type != 9 || sections.ListType != 10 {
+		return 0
+	}
+	items, _ := sections.Value.([]nbtTreeTag)
+	total := 0
+	for sectionIndex := range items {
+		section := &items[sectionIndex]
+		blockStates := nbtCompoundChild(section, "block_states")
+		if blockStates == nil {
+			blockStates = section
+		}
+		palette := nbtCompoundChild(blockStates, "palette", "Palette")
+		if palette == nil || palette.Type != 9 || palette.ListType != 10 {
+			continue
+		}
+		paletteItems, _ := palette.Value.([]nbtTreeTag)
+		matchingIndexes := map[int]bool{}
+		for paletteIndex := range paletteItems {
+			nameTag := nbtCompoundChild(&paletteItems[paletteIndex], "Name")
+			name := nbtString(nameTag)
+			if namespaceMatches(name, namespaces) {
+				matchingIndexes[paletteIndex] = true
+				if cleanup {
+					nameTag.Value = "minecraft:air"
+					report.Changed = true
+				}
+			}
+		}
+		if len(matchingIndexes) == 0 {
+			continue
+		}
+		palette.Value = paletteItems
+		dataTag := nbtCompoundChild(blockStates, "data", "BlockStates")
+		blockData, _ := nbtLongArray(dataTag)
+		total += countMatchingPaletteBlocks(blockData, len(paletteItems), matchingIndexes)
+	}
+	sections.Value = items
+	return total
+}
+
+func scanAndMaybeRemoveNamedList(data *nbtTreeTag, namespaces map[string]bool, cleanup bool, report *modWorldChunkReport, names ...string) int {
+	list := nbtCompoundChild(data, names...)
+	if list == nil || list.Type != 9 || list.ListType != 10 {
+		return 0
+	}
+	items, _ := list.Value.([]nbtTreeTag)
+	matches := 0
+	next := make([]nbtTreeTag, 0, len(items))
+	for index := range items {
+		id := nbtString(nbtCompoundChild(&items[index], "id", "Id"))
+		if namespaceMatches(id, namespaces) {
+			matches++
+			continue
+		}
+		next = append(next, items[index])
+	}
+	if cleanup && matches > 0 {
+		list.Value = next
+		report.Changed = true
+	}
+	return matches
+}
+
+func countMatchingPaletteBlocks(data []int64, paletteSize int, matching map[int]bool) int {
+	if paletteSize <= 0 || len(matching) == 0 {
+		return 0
+	}
+	if len(data) == 0 {
+		if matching[0] {
+			return 4096
+		}
+		return 0
+	}
+	bits := 1
+	for (1 << bits) < paletteSize {
+		bits++
+	}
+	if bits < 4 {
+		bits = 4
+	}
+	mask := uint64((1 << bits) - 1)
+	count := 0
+	for blockIndex := 0; blockIndex < 4096; blockIndex++ {
+		bitIndex := blockIndex * bits
+		longIndex := bitIndex / 64
+		startBit := bitIndex % 64
+		if longIndex < 0 || longIndex >= len(data) {
+			continue
+		}
+		value := (uint64(data[longIndex]) >> startBit) & mask
+		bitsInFirst := 64 - startBit
+		if bitsInFirst < bits && longIndex+1 < len(data) {
+			value |= (uint64(data[longIndex+1]) << bitsInFirst) & mask
+		}
+		if matching[int(value)] {
+			count++
+		}
+	}
+	return count
+}
+
+func namespaceMatches(id string, namespaces map[string]bool) bool {
+	namespace, _, ok := strings.Cut(strings.ToLower(strings.TrimSpace(id)), ":")
+	return ok && namespaces[namespace]
+}
+
+func nbtCompoundChild(tag *nbtTreeTag, names ...string) *nbtTreeTag {
+	if tag == nil || tag.Type != 10 {
+		return nil
+	}
+	children, _ := tag.Value.([]nbtTreeTag)
+	for i := range children {
+		for _, name := range names {
+			if children[i].Name == name {
+				return &children[i]
+			}
+		}
+	}
+	return nil
+}
+
+func nbtString(tag *nbtTreeTag) string {
+	if tag == nil || tag.Type != 8 {
+		return ""
+	}
+	value, _ := tag.Value.(string)
+	return value
+}
+
+func nbtLongArray(tag *nbtTreeTag) ([]int64, bool) {
+	if tag == nil || tag.Type != 12 {
+		return nil, false
+	}
+	value, ok := tag.Value.([]int64)
+	return value, ok
+}
+
+type nbtReader struct {
+	reader *bytes.Reader
+}
+
+func readNBTCompound(data []byte) (nbtCompound, error) {
+	n := &nbtReader{reader: bytes.NewReader(data)}
+	tag, err := n.readByte()
+	if err != nil {
+		return nil, err
+	}
+	if tag != 10 {
+		return nil, errors.New("root NBT tag is not a compound")
+	}
+	if _, err := n.readString(); err != nil {
+		return nil, err
+	}
+	value, err := n.readPayload(tag)
+	if err != nil {
+		return nil, err
+	}
+	compound, ok := value.(nbtCompound)
+	if !ok {
+		return nil, errors.New("root NBT payload is not a compound")
+	}
+	return compound, nil
+}
+
+func readNBTTree(data []byte) (*nbtTreeTag, error) {
+	n := &nbtReader{reader: bytes.NewReader(data)}
+	tagType, err := n.readByte()
+	if err != nil {
+		return nil, err
+	}
+	if tagType != 10 {
+		return nil, errors.New("root NBT tag is not a compound")
+	}
+	name, err := n.readString()
+	if err != nil {
+		return nil, err
+	}
+	tag, err := n.readTreePayload(tagType)
+	if err != nil {
+		return nil, err
+	}
+	tag.Name = name
+	return &tag, nil
+}
+
+func (n *nbtReader) readTreePayload(tag byte) (nbtTreeTag, error) {
+	out := nbtTreeTag{Type: tag}
+	switch tag {
+	case 1:
+		value, err := n.readByte()
+		out.Value = value
+		return out, err
+	case 2:
+		value, err := n.readUint16()
+		out.Value = int16(value)
+		return out, err
+	case 3:
+		value, err := n.readUint32()
+		out.Value = int32(value)
+		return out, err
+	case 4:
+		value, err := n.readUint64()
+		out.Value = int64(value)
+		return out, err
+	case 5:
+		value, err := n.readUint32()
+		out.Value = value
+		return out, err
+	case 6:
+		value, err := n.readUint64()
+		out.Value = value
+		return out, err
+	case 7:
+		length, err := n.readInt32()
+		if err != nil {
+			return out, err
+		}
+		if length < 0 {
+			return out, errors.New("negative byte array length")
+		}
+		value := make([]byte, int(length))
+		_, err = io.ReadFull(n.reader, value)
+		out.Value = value
+		return out, err
+	case 8:
+		value, err := n.readString()
+		out.Value = value
+		return out, err
+	case 9:
+		childTag, err := n.readByte()
+		if err != nil {
+			return out, err
+		}
+		length, err := n.readInt32()
+		if err != nil {
+			return out, err
+		}
+		if length < 0 {
+			return out, errors.New("negative list length")
+		}
+		items := make([]nbtTreeTag, int(length))
+		for i := range items {
+			item, err := n.readTreePayload(childTag)
+			if err != nil {
+				return out, err
+			}
+			items[i] = item
+		}
+		out.ListType = childTag
+		out.Value = items
+		return out, nil
+	case 10:
+		children := []nbtTreeTag{}
+		for {
+			childTag, err := n.readByte()
+			if err != nil {
+				return out, err
+			}
+			if childTag == 0 {
+				break
+			}
+			name, err := n.readString()
+			if err != nil {
+				return out, err
+			}
+			child, err := n.readTreePayload(childTag)
+			if err != nil {
+				return out, err
+			}
+			child.Name = name
+			children = append(children, child)
+		}
+		out.Value = children
+		return out, nil
+	case 11:
+		length, err := n.readInt32()
+		if err != nil {
+			return out, err
+		}
+		if length < 0 {
+			return out, errors.New("negative int array length")
+		}
+		value := make([]int32, int(length))
+		for i := range value {
+			next, err := n.readUint32()
+			if err != nil {
+				return out, err
+			}
+			value[i] = int32(next)
+		}
+		out.Value = value
+		return out, nil
+	case 12:
+		length, err := n.readInt32()
+		if err != nil {
+			return out, err
+		}
+		if length < 0 {
+			return out, errors.New("negative long array length")
+		}
+		value := make([]int64, int(length))
+		for i := range value {
+			next, err := n.readUint64()
+			if err != nil {
+				return out, err
+			}
+			value[i] = int64(next)
+		}
+		out.Value = value
+		return out, nil
+	default:
+		return out, fmt.Errorf("unsupported NBT tag %d", tag)
+	}
+}
+
+func writeNBTTree(root *nbtTreeTag) ([]byte, error) {
+	if root == nil || root.Type != 10 {
+		return nil, errors.New("root NBT tag is not a compound")
+	}
+	var buf bytes.Buffer
+	buf.WriteByte(root.Type)
+	writeNBTString(&buf, root.Name)
+	if err := writeNBTPayload(&buf, root); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func writeNBTPayload(buf *bytes.Buffer, tag *nbtTreeTag) error {
+	switch tag.Type {
+	case 1:
+		buf.WriteByte(byteFromAny(tag.Value))
+	case 2:
+		writeUint16(buf, uint16(int16FromAny(tag.Value)))
+	case 3:
+		writeUint32(buf, uint32(int32FromAny(tag.Value)))
+	case 4:
+		writeUint64(buf, uint64(int64FromAny(tag.Value)))
+	case 5:
+		writeUint32(buf, uint32FromAny(tag.Value))
+	case 6:
+		writeUint64(buf, uint64FromAny(tag.Value))
+	case 7:
+		value, _ := tag.Value.([]byte)
+		writeUint32(buf, uint32(len(value)))
+		buf.Write(value)
+	case 8:
+		writeNBTString(buf, stringFromAny(tag.Value))
+	case 9:
+		items, _ := tag.Value.([]nbtTreeTag)
+		buf.WriteByte(tag.ListType)
+		writeUint32(buf, uint32(len(items)))
+		for i := range items {
+			item := items[i]
+			item.Type = tag.ListType
+			if err := writeNBTPayload(buf, &item); err != nil {
+				return err
+			}
+		}
+	case 10:
+		children, _ := tag.Value.([]nbtTreeTag)
+		for i := range children {
+			buf.WriteByte(children[i].Type)
+			writeNBTString(buf, children[i].Name)
+			if err := writeNBTPayload(buf, &children[i]); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte(0)
+	case 11:
+		value, _ := tag.Value.([]int32)
+		writeUint32(buf, uint32(len(value)))
+		for _, next := range value {
+			writeUint32(buf, uint32(next))
+		}
+	case 12:
+		value, _ := tag.Value.([]int64)
+		writeUint32(buf, uint32(len(value)))
+		for _, next := range value {
+			writeUint64(buf, uint64(next))
+		}
+	default:
+		return fmt.Errorf("unsupported NBT tag %d", tag.Type)
+	}
+	return nil
+}
+
+func writeNBTString(buf *bytes.Buffer, value string) {
+	if len(value) > 65535 {
+		value = value[:65535]
+	}
+	writeUint16(buf, uint16(len(value)))
+	buf.WriteString(value)
+}
+
+func writeUint16(buf *bytes.Buffer, value uint16) {
+	var tmp [2]byte
+	binary.BigEndian.PutUint16(tmp[:], value)
+	buf.Write(tmp[:])
+}
+
+func writeUint32(buf *bytes.Buffer, value uint32) {
+	var tmp [4]byte
+	binary.BigEndian.PutUint32(tmp[:], value)
+	buf.Write(tmp[:])
+}
+
+func writeUint64(buf *bytes.Buffer, value uint64) {
+	var tmp [8]byte
+	binary.BigEndian.PutUint64(tmp[:], value)
+	buf.Write(tmp[:])
+}
+
+func byteFromAny(value any) byte {
+	switch v := value.(type) {
+	case byte:
+		return v
+	case int8:
+		return byte(v)
+	case int:
+		return byte(v)
+	default:
+		return 0
+	}
+}
+
+func int16FromAny(value any) int16 {
+	switch v := value.(type) {
+	case int16:
+		return v
+	case uint16:
+		return int16(v)
+	case int:
+		return int16(v)
+	default:
+		return 0
+	}
+}
+
+func int32FromAny(value any) int32 {
+	switch v := value.(type) {
+	case int32:
+		return v
+	case uint32:
+		return int32(v)
+	case int:
+		return int32(v)
+	default:
+		return 0
+	}
+}
+
+func int64FromAny(value any) int64 {
+	switch v := value.(type) {
+	case int64:
+		return v
+	case uint64:
+		return int64(v)
+	case int:
+		return int64(v)
+	default:
+		return 0
+	}
+}
+
+func uint32FromAny(value any) uint32 {
+	switch v := value.(type) {
+	case uint32:
+		return v
+	case int32:
+		return uint32(v)
+	case int:
+		return uint32(v)
+	default:
+		return 0
+	}
+}
+
+func uint64FromAny(value any) uint64 {
+	switch v := value.(type) {
+	case uint64:
+		return v
+	case int64:
+		return uint64(v)
+	case int:
+		return uint64(v)
+	default:
+		return 0
+	}
+}
+
+func stringFromAny(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func (n *nbtReader) readPayload(tag byte) (any, error) {
+	switch tag {
+	case 1:
+		return n.readByte()
+	case 2:
+		value, err := n.readUint16()
+		return int16(value), err
+	case 3:
+		value, err := n.readUint32()
+		return int32(value), err
+	case 4:
+		value, err := n.readUint64()
+		return int64(value), err
+	case 5:
+		value, err := n.readUint32()
+		return value, err
+	case 6:
+		value, err := n.readUint64()
+		return value, err
+	case 7:
+		length, err := n.readInt32()
+		if err != nil {
+			return nil, err
+		}
+		if length < 0 {
+			return nil, errors.New("negative byte array length")
+		}
+		out := make([]byte, int(length))
+		_, err = io.ReadFull(n.reader, out)
+		return out, err
+	case 8:
+		return n.readString()
+	case 9:
+		childTag, err := n.readByte()
+		if err != nil {
+			return nil, err
+		}
+		length, err := n.readInt32()
+		if err != nil {
+			return nil, err
+		}
+		if length < 0 {
+			return nil, errors.New("negative list length")
+		}
+		out := make([]any, int(length))
+		for i := range out {
+			value, err := n.readPayload(childTag)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = value
+		}
+		return out, nil
+	case 10:
+		out := nbtCompound{}
+		for {
+			childTag, err := n.readByte()
+			if err != nil {
+				return nil, err
+			}
+			if childTag == 0 {
+				break
+			}
+			name, err := n.readString()
+			if err != nil {
+				return nil, err
+			}
+			value, err := n.readPayload(childTag)
+			if err != nil {
+				return nil, err
+			}
+			out[name] = value
+		}
+		return out, nil
+	case 11:
+		length, err := n.readInt32()
+		if err != nil {
+			return nil, err
+		}
+		if length < 0 {
+			return nil, errors.New("negative int array length")
+		}
+		out := make([]int32, int(length))
+		for i := range out {
+			value, err := n.readInt32()
+			if err != nil {
+				return nil, err
+			}
+			out[i] = value
+		}
+		return out, nil
+	case 12:
+		length, err := n.readInt32()
+		if err != nil {
+			return nil, err
+		}
+		if length < 0 {
+			return nil, errors.New("negative long array length")
+		}
+		out := make([]int64, int(length))
+		for i := range out {
+			value, err := n.readInt64()
+			if err != nil {
+				return nil, err
+			}
+			out[i] = value
+		}
+		return out, nil
+	default:
+		return nil, errors.New("unsupported NBT tag")
+	}
+}
+
+func (n *nbtReader) readByte() (byte, error) {
+	value, err := n.reader.ReadByte()
+	return value, err
+}
+
+func (n *nbtReader) readUint16() (uint16, error) {
+	var bytes [2]byte
+	_, err := io.ReadFull(n.reader, bytes[:])
+	return binary.BigEndian.Uint16(bytes[:]), err
+}
+
+func (n *nbtReader) readUint32() (uint32, error) {
+	var bytes [4]byte
+	_, err := io.ReadFull(n.reader, bytes[:])
+	return binary.BigEndian.Uint32(bytes[:]), err
+}
+
+func (n *nbtReader) readUint64() (uint64, error) {
+	var bytes [8]byte
+	_, err := io.ReadFull(n.reader, bytes[:])
+	return binary.BigEndian.Uint64(bytes[:]), err
+}
+
+func (n *nbtReader) readInt32() (int32, error) {
+	value, err := n.readUint32()
+	return int32(value), err
+}
+
+func (n *nbtReader) readInt64() (int64, error) {
+	value, err := n.readUint64()
+	return int64(value), err
+}
+
+func (n *nbtReader) readString() (string, error) {
+	length, err := n.readUint16()
+	if err != nil {
+		return "", err
+	}
+	if length == 0 {
+		return "", nil
+	}
+	bytes := make([]byte, int(length))
+	_, err = io.ReadFull(n.reader, bytes)
+	return string(bytes), err
+}
+
+type worldChunkSection struct {
+	Y             int
+	Palette       []string
+	Data          []int64
+	Bits          int
+	Mask          uint64
+	ValuesPerLong int
+	Compact       bool
+}
+
+func chunkSurfacePixels(root nbtCompound, dimension string) ([]string, error) {
+	data := root
+	if level, ok := root["Level"].(nbtCompound); ok {
+		data = level
+	}
+	rawSections, ok := data["sections"].([]any)
+	if !ok {
+		rawSections, ok = data["Sections"].([]any)
+	}
+	if !ok || len(rawSections) == 0 {
+		return nil, errors.New("chunk has no sections")
+	}
+	sections := []worldChunkSection{}
+	for _, raw := range rawSections {
+		compound, ok := raw.(nbtCompound)
+		if !ok {
+			continue
+		}
+		section, ok := parseWorldChunkSection(compound)
+		if ok {
+			sections = append(sections, section)
+		}
+	}
+	if len(sections) == 0 {
+		return nil, errors.New("chunk has no block states")
+	}
+	sort.Slice(sections, func(i, j int) bool { return sections[i].Y > sections[j].Y })
+	pixels := make([]string, 16*16)
+	for z := 0; z < 16; z++ {
+		for x := 0; x < 16; x++ {
+			color := fallbackDimensionColor(dimension)
+			found := false
+			for _, section := range sections {
+				for y := 15; y >= 0; y-- {
+					block := section.blockAt(x, y, z)
+					if skipSurfaceBlock(block) {
+						continue
+					}
+					color = colorForBlock(block, dimension)
+					found = true
+					break
+				}
+				if found {
+					break
+				}
+			}
+			pixels[z*16+x] = color
+		}
+	}
+	return pixels, nil
+}
+
+func parseWorldChunkSection(section nbtCompound) (worldChunkSection, bool) {
+	y := intFromAny(section["Y"], 0)
+	blockStates, _ := section["block_states"].(nbtCompound)
+	if blockStates == nil {
+		blockStates = section
+	}
+	rawPalette, ok := blockStates["palette"].([]any)
+	if !ok {
+		rawPalette, ok = blockStates["Palette"].([]any)
+	}
+	if !ok || len(rawPalette) == 0 {
+		return worldChunkSection{}, false
+	}
+	palette := make([]string, 0, len(rawPalette))
+	for _, raw := range rawPalette {
+		compound, ok := raw.(nbtCompound)
+		if !ok {
+			continue
+		}
+		name, _ := compound["Name"].(string)
+		if name == "" {
+			name = "minecraft:air"
+		}
+		palette = append(palette, name)
+	}
+	if len(palette) == 0 {
+		return worldChunkSection{}, false
+	}
+	data, _ := blockStates["data"].([]int64)
+	if data == nil {
+		data, _ = blockStates["BlockStates"].([]int64)
+	}
+	bitCount := 1
+	for (1 << bitCount) < len(palette) {
+		bitCount++
+	}
+	if bitCount < 4 {
+		bitCount = 4
+	}
+	valuesPerLong := 64 / bitCount
+	if valuesPerLong <= 0 {
+		valuesPerLong = 1
+	}
+	compactLength := (4096*bitCount + 63) / 64
+	paddedLength := (4096 + valuesPerLong - 1) / valuesPerLong
+	compact := len(data) > 0 && len(data) <= compactLength && compactLength < paddedLength
+	return worldChunkSection{Y: y, Palette: palette, Data: data, Bits: bitCount, Mask: (uint64(1) << bitCount) - 1, ValuesPerLong: valuesPerLong, Compact: compact}, true
+}
+
+func (s worldChunkSection) blockAt(x, y, z int) string {
+	if len(s.Palette) == 0 {
+		return "minecraft:air"
+	}
+	if len(s.Data) == 0 {
+		return s.Palette[0]
+	}
+	blockIndex := y*256 + z*16 + x
+	if !s.Compact {
+		valuesPerLong := s.ValuesPerLong
+		if valuesPerLong <= 0 {
+			valuesPerLong = 64 / s.Bits
+		}
+		if valuesPerLong <= 0 {
+			valuesPerLong = 1
+		}
+		longIndex := blockIndex / valuesPerLong
+		startBit := (blockIndex - longIndex*valuesPerLong) * s.Bits
+		if longIndex < 0 || longIndex >= len(s.Data) {
+			return s.Palette[0]
+		}
+		index := int((uint64(s.Data[longIndex]) >> startBit) & s.Mask)
+		if index < 0 || index >= len(s.Palette) {
+			return s.Palette[0]
+		}
+		return s.Palette[index]
+	}
+	bitIndex := blockIndex * s.Bits
+	longIndex := bitIndex / 64
+	startBit := bitIndex % 64
+	if longIndex < 0 || longIndex >= len(s.Data) {
+		return s.Palette[0]
+	}
+	value := (uint64(s.Data[longIndex]) >> startBit) & s.Mask
+	bitsInFirst := 64 - startBit
+	if bitsInFirst < s.Bits && longIndex+1 < len(s.Data) {
+		value |= (uint64(s.Data[longIndex+1]) << bitsInFirst) & s.Mask
+	}
+	index := int(value)
+	if index < 0 || index >= len(s.Palette) {
+		return s.Palette[0]
+	}
+	return s.Palette[index]
+}
+
+func fallbackChunkPixels(dimension string) []string {
+	color := fallbackDimensionColor(dimension)
+	pixels := make([]string, 16*16)
+	for i := range pixels {
+		pixels[i] = color
+	}
+	return pixels
+}
+
+func fallbackDimensionColor(dimension string) string {
+	switch dimension {
+	case "nether":
+		return "#5c1e24"
+	case "end":
+		return "#d9d2a3"
+	default:
+		return "#4f8a3d"
+	}
+}
+
+func overviewChunkColor(ref worldRegionChunkRef, dimension string) string {
+	hash := uint32(ref.ChunkX)*374761393 + uint32(ref.ChunkZ)*668265263 + 0x9e3779b9
+	hash ^= hash >> 13
+	hash *= 1274126177
+	hash ^= hash >> 16
+	shade := int(hash % 42)
+	var r, g, b int
+	switch dimension {
+	case "nether":
+		r = 86 + shade
+		g = 24 + shade/4
+		b = 31 + shade/3
+	case "end":
+		r = 174 + shade
+		g = 166 + shade
+		b = 117 + shade/2
+	default:
+		if hash%11 == 0 {
+			r = 54 + shade/3
+			g = 90 + shade/2
+			b = 142 + shade
+		} else if hash%7 == 0 {
+			r = 126 + shade
+			g = 108 + shade/2
+			b = 70 + shade/3
+		} else {
+			r = 56 + shade/3
+			g = 106 + shade
+			b = 62 + shade/2
+		}
+	}
+	return fmt.Sprintf("#%02x%02x%02x", clampInt(r, 0, 255), clampInt(g, 0, 255), clampInt(b, 0, 255))
+}
+
+func skipSurfaceBlock(block string) bool {
+	block = strings.ToLower(block)
+	if block == "" || strings.Contains(block, "air") {
+		return true
+	}
+	for _, token := range []string{"torch", "flower", "grass", "fern", "sapling", "vine", "button", "pressure_plate", "carpet", "rail", "sign", "banner"} {
+		if strings.Contains(block, token) && block != "minecraft:grass_block" {
+			return true
+		}
+	}
+	return false
+}
+
+func colorForBlock(block, dimension string) string {
+	block = strings.ToLower(block)
+	switch {
+	case strings.Contains(block, "water"), strings.Contains(block, "ice"):
+		return "#376dba"
+	case strings.Contains(block, "lava"):
+		return "#e26522"
+	case strings.Contains(block, "snow"):
+		return "#edf2f4"
+	case strings.Contains(block, "sand"), strings.Contains(block, "sandstone"):
+		return "#d7c47a"
+	case strings.Contains(block, "gravel"):
+		return "#8a867f"
+	case strings.Contains(block, "clay"), strings.Contains(block, "terracotta"):
+		return "#9b7465"
+	case strings.Contains(block, "stone"), strings.Contains(block, "deepslate"), strings.Contains(block, "ore"):
+		return "#777a7f"
+	case strings.Contains(block, "dirt"), strings.Contains(block, "mud"), strings.Contains(block, "farmland"):
+		return "#7b5934"
+	case strings.Contains(block, "podzol"):
+		return "#5f4024"
+	case strings.Contains(block, "log"), strings.Contains(block, "wood"), strings.Contains(block, "planks"):
+		return "#8a5b32"
+	case strings.Contains(block, "leaves"), strings.Contains(block, "moss"), strings.Contains(block, "azalea"):
+		return "#2f7d37"
+	case strings.Contains(block, "grass_block"):
+		return "#4f9a45"
+	case strings.Contains(block, "netherrack"), strings.Contains(block, "nether_wart"):
+		return "#6d2529"
+	case strings.Contains(block, "crimson"):
+		return "#7d1f45"
+	case strings.Contains(block, "warped"):
+		return "#1f756f"
+	case strings.Contains(block, "basalt"), strings.Contains(block, "blackstone"):
+		return "#343238"
+	case strings.Contains(block, "soul_sand"), strings.Contains(block, "soul_soil"):
+		return "#5e4b3f"
+	case strings.Contains(block, "end_stone"):
+		return "#d9d2a3"
+	case strings.Contains(block, "purpur"):
+		return "#b88bc0"
+	default:
+		return fallbackDimensionColor(dimension)
+	}
+}
+
+func intFromAny(value any, fallback int) int {
+	switch v := value.(type) {
+	case byte:
+		return int(int8(v))
+	case int16:
+		return int(v)
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	case int:
+		return v
+	default:
+		return fallback
+	}
+}
+
+func queryInt(r *http.Request, key string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get(key)))
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
 func (a *app) handleModsList(w http.ResponseWriter, r *http.Request) {
 	id := normalizeServerID(r.URL.Query().Get("serverId"))
 	if strings.TrimSpace(r.URL.Query().Get("serverId")) == "" {
@@ -2738,6 +6339,28 @@ func (a *app) handleModsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, lock)
+}
+
+func (a *app) handleModsProviders(w http.ResponseWriter, r *http.Request) {
+	key := a.curseForgeAPIKey()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"providers": []map[string]any{
+			{
+				"id":          "modrinth",
+				"name":        "Modrinth",
+				"enabled":     true,
+				"configured":  true,
+				"description": "No API key required. Best supported provider in MineMux.",
+			},
+			{
+				"id":          "curseforge",
+				"name":        "CurseForge",
+				"enabled":     key != "",
+				"configured":  key != "",
+				"description": "Requires a CurseForge Core API key for search and installs.",
+			},
+		},
+	})
 }
 
 func (a *app) handleModsSearch(w http.ResponseWriter, r *http.Request) {
@@ -2763,12 +6386,46 @@ func (a *app) handleModsSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "query is required"})
 		return
 	}
-	res, err := searchModrinth(query, p)
+	provider := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("provider")))
+	if provider == "" {
+		provider = "all"
+	}
+	res, err := a.searchMods(provider, query, p)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *app) handleModVersions(w http.ResponseWriter, r *http.Request) {
+	id := serverIDFromRequest(a, r)
+	p, err := a.loadProfileFor(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("provider")))
+	if provider == "" {
+		provider = "modrinth"
+	}
+	projectID := strings.TrimSpace(r.URL.Query().Get("projectId"))
+	if projectID == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "projectId is required"})
+		return
+	}
+	var versions []modVersionOption
+	switch provider {
+	case "curseforge":
+		versions, err = a.curseForgeVersions(projectID, p)
+	default:
+		versions, err = modrinthVersions(projectID, p)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"versions": versions})
 }
 
 func (a *app) handleModsInstall(w http.ResponseWriter, r *http.Request) {
@@ -2790,18 +6447,48 @@ func (a *app) handleModsInstall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "projectId is required"})
 		return
 	}
-	if p.Features.CreateRestorePointBeforeModChanges {
-		if _, err := a.createBackupFor(id, "before-mod-install"); err != nil {
-			writeJSON(w, http.StatusInternalServerError, apiError{Error: "restore point failed: " + err.Error()})
-			return
-		}
+	provider := strings.ToLower(strings.TrimSpace(req.Provider))
+	if provider == "" {
+		provider = "modrinth"
 	}
-	installed, err := a.installModrinthProjectFor(id, p, req.ProjectID, req.VersionID, map[string]bool{})
+	var installed []lockedInstall
+	if provider == "curseforge" {
+		installed, err = a.installCurseForgeProjectFor(id, p, req.ProjectID, req.VersionID)
+	} else {
+		installed, err = a.installModrinthProjectFor(id, p, req.ProjectID, req.VersionID, map[string]bool{})
+	}
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"installed": installed})
+}
+
+func (a *app) handleCurseForgeKeySave(w http.ResponseWriter, r *http.Request) {
+	var req curseForgeKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid JSON body"})
+		return
+	}
+	key := strings.TrimSpace(req.APIKey)
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "apiKey is required"})
+		return
+	}
+	if err := os.MkdirAll(a.paths().Runtime, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if err := os.WriteFile(a.curseForgeKeyPath(), []byte(key+"\n"), 0o600); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"configured": true})
+}
+
+func (a *app) handleCurseForgeKeyDelete(w http.ResponseWriter, r *http.Request) {
+	_ = os.Remove(a.curseForgeKeyPath())
+	writeJSON(w, http.StatusOK, map[string]bool{"configured": false})
 }
 
 func (a *app) handleModsUninstall(w http.ResponseWriter, r *http.Request) {
@@ -2841,12 +6528,6 @@ func (a *app) handleModsUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, apiError{Error: "profile not found; run setup first"})
 		return
-	}
-	if p.Features.CreateRestorePointBeforeModChanges {
-		if _, err := a.createBackupFor(id, "before-jar-upload"); err != nil {
-			writeJSON(w, http.StatusInternalServerError, apiError{Error: "restore point failed: " + err.Error()})
-			return
-		}
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
@@ -3256,76 +6937,86 @@ func supportedLoader(loader string) bool {
 }
 
 func (a *app) installServerRuntime(p *profile, javaMajor int) (string, error) {
+	return a.installServerRuntimeFor(a.activeServerIDValue(), p, javaMajor)
+}
+
+func (a *app) installServerRuntimeFor(serverID string, p *profile, javaMajor int) (string, error) {
+	serverID = normalizeServerID(serverID)
+	serverDir := a.serverDir(serverID)
+	if err := os.MkdirAll(serverDir, 0o755); err != nil {
+		return "", err
+	}
+	serverJarPath := filepath.Join(serverDir, "server.jar")
 	loader := strings.ToLower(strings.TrimSpace(p.Loader))
 	switch loader {
 	case "vanilla":
 		a.appendSetupLog("Resolving Vanilla server download")
-		version, jarURL, sha1sum, err := resolveVanillaDownload(p.MinecraftVersion)
+		version, jarURL, sha1sum, err := resolveVanillaDownload(p.MinecraftVersion, javaMajor)
 		if err != nil {
 			return "", err
 		}
 		a.appendSetupLog("Downloading Vanilla server.jar")
-		return version, downloadFileWithSHA1(jarURL, a.serverJarPath(), sha1sum)
+		return version, downloadFileWithSHA1(jarURL, serverJarPath, sha1sum)
 	case "quilt":
 		version := p.MinecraftVersion
 		if version == "" || version == "latest-compatible" {
-			version = latestFallbackMinecraftVersion(javaMajor)
+			version = latestCompatibleMinecraftVersion(p.Loader, javaMajor)
 		}
 		a.appendSetupLog("Downloading Quilt installer")
 		installer, err := latestMavenInstaller("https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer/maven-metadata.xml", "https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer")
 		if err != nil {
 			return "", err
 		}
-		installerPath := filepath.Join(a.paths().ServerMain, "quilt-installer.jar")
+		installerPath := filepath.Join(serverDir, "quilt-installer.jar")
 		if err := downloadFile(installer, installerPath); err != nil {
 			return "", err
 		}
 		a.appendSetupLog("Running Quilt server installer")
-		if err := a.runInstaller("java", "-jar", installerPath, "install", "server", version, "--download-server", "--install-dir="+a.paths().ServerMain); err != nil {
+		if err := a.runInstallerInDir(serverDir, "java", "-jar", installerPath, "install", "server", version, "--download-server", "--install-dir="+serverDir); err != nil {
 			return "", err
 		}
 		return version, nil
 	case "fabric":
 		version := p.MinecraftVersion
 		if version == "" || version == "latest-compatible" {
-			version = latestFallbackMinecraftVersion(javaMajor)
+			version = latestCompatibleMinecraftVersion(p.Loader, javaMajor)
 		}
 		a.appendSetupLog("Downloading Fabric installer")
 		installer, err := latestMavenInstaller("https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml", "https://maven.fabricmc.net/net/fabricmc/fabric-installer")
 		if err != nil {
 			return "", err
 		}
-		installerPath := filepath.Join(a.paths().ServerMain, "fabric-installer.jar")
+		installerPath := filepath.Join(serverDir, "fabric-installer.jar")
 		if err := downloadFile(installer, installerPath); err != nil {
 			return "", err
 		}
 		a.appendSetupLog("Running Fabric server installer")
-		if err := a.runInstaller("java", "-jar", installerPath, "server", "-mcversion", version, "-downloadMinecraft", "-dir", a.paths().ServerMain); err != nil {
+		if err := a.runInstallerInDir(serverDir, "java", "-jar", installerPath, "server", "-mcversion", version, "-downloadMinecraft", "-dir", serverDir); err != nil {
 			return "", err
 		}
 		return version, nil
 	case "forge":
 		version := p.MinecraftVersion
 		if version == "" || version == "latest-compatible" {
-			version = latestFallbackMinecraftVersion(javaMajor)
+			version = latestCompatibleMinecraftVersion(p.Loader, javaMajor)
 		}
 		a.appendSetupLog("Resolving Forge installer")
 		installer, resolved, err := resolveForgeInstaller(version)
 		if err != nil {
 			return "", err
 		}
-		return resolved, a.installForgeFamily("Forge", installer)
+		return resolved, a.installForgeFamilyFor(serverID, "Forge", installer)
 	case "neoforge":
 		version := p.MinecraftVersion
 		if version == "" || version == "latest-compatible" {
-			version = latestFallbackMinecraftVersion(javaMajor)
+			version = latestCompatibleMinecraftVersion(p.Loader, javaMajor)
 		}
 		a.appendSetupLog("Resolving NeoForge installer")
 		installer, resolved, err := resolveNeoForgeInstaller(version)
 		if err != nil {
 			return "", err
 		}
-		return resolved, a.installForgeFamily("NeoForge", installer)
+		return resolved, a.installForgeFamilyFor(serverID, "NeoForge", installer)
 	default:
 		a.appendSetupLog("Resolving Paper version and download")
 		version, jarURL, sha, err := resolvePaperDownload(p.MinecraftVersion, javaMajor)
@@ -3333,21 +7024,26 @@ func (a *app) installServerRuntime(p *profile, javaMajor int) (string, error) {
 			return "", err
 		}
 		a.appendSetupLog("Downloading Paper server.jar")
-		return version, downloadFileWithSHA256(jarURL, a.serverJarPath(), sha)
+		return version, downloadFileWithSHA256(jarURL, serverJarPath, sha)
 	}
 }
 
 func (a *app) installForgeFamily(name, installerURL string) error {
-	installerPath := filepath.Join(a.paths().ServerMain, strings.ToLower(name)+"-installer.jar")
+	return a.installForgeFamilyFor(a.activeServerIDValue(), name, installerURL)
+}
+
+func (a *app) installForgeFamilyFor(serverID, name, installerURL string) error {
+	serverDir := a.serverDir(serverID)
+	installerPath := filepath.Join(serverDir, strings.ToLower(name)+"-installer.jar")
 	a.appendSetupLog("Downloading " + name + " installer")
 	if err := downloadFile(installerURL, installerPath); err != nil {
 		return err
 	}
 	a.appendSetupLog("Running " + name + " server installer")
-	if err := a.runInstaller("java", "-jar", installerPath, "--installServer"); err != nil {
+	if err := a.runInstallerInDir(serverDir, "java", "-jar", installerPath, "--installServer"); err != nil {
 		return err
 	}
-	_ = os.WriteFile(filepath.Join(a.paths().ServerMain, "user_jvm_args.txt"), []byte("# MineMux writes memory limits before start\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(serverDir, "user_jvm_args.txt"), []byte("# MineMux writes memory limits before start\n"), 0o644)
 	return nil
 }
 
@@ -3358,27 +7054,58 @@ func (a *app) appendSetupLog(line string) {
 }
 
 func (a *app) runInstaller(command string, args ...string) error {
+	return a.runInstallerInDir(a.paths().ServerMain, command, args...)
+}
+
+func (a *app) runInstallerInDir(dir, command string, args ...string) error {
 	cmd := exec.Command(command, args...)
-	cmd.Dir = a.paths().ServerMain
+	cmd.Dir = dir
 	cmd.Env = cleanJavaEnv(os.Environ())
 	return runCommandStreaming(cmd, a.appendSetupLog)
 }
 
 func minecraftVersionOptions(javaMajor int) ([]minecraftVersionOption, string, string) {
-	versions, err := fetchMojangReleaseVersions(javaMajor)
-	if err == nil && len(versions) > 0 {
-		return versions, "mojang", ""
+	return minecraftVersionOptionsForLoader("vanilla", javaMajor)
+}
+
+func minecraftVersionOptionsForLoader(loader string, javaMajor int) ([]minecraftVersionOption, string, string) {
+	loader = strings.ToLower(strings.TrimSpace(loader))
+	if loader == "" {
+		loader = "paper"
 	}
-	mojangErr := err
-	versions, err = fetchPaperMinecraftVersions(javaMajor)
+	var (
+		versions []minecraftVersionOption
+		source   string
+		err      error
+	)
+	switch loader {
+	case "vanilla":
+		versions, err = fetchMojangReleaseVersions(javaMajor)
+		source = "mojang"
+	case "fabric":
+		versions, err = fetchFabricMinecraftVersions(javaMajor)
+		source = "fabric"
+	case "quilt":
+		versions, err = fetchQuiltMinecraftVersions(javaMajor)
+		source = "quilt"
+	case "forge":
+		versions, err = fetchForgeMinecraftVersions(javaMajor)
+		source = "forge"
+	case "neoforge":
+		versions, err = fetchNeoForgeMinecraftVersions(javaMajor)
+		source = "neoforge"
+	default:
+		versions, err = fetchPaperMinecraftVersions(javaMajor)
+		source = "papermc"
+	}
 	if err == nil && len(versions) > 0 {
-		return versions, "papermc", ""
+		return versions, source, ""
 	}
 	warning := ""
-	if mojangErr != nil {
-		warning = mojangErr.Error()
-	} else if err != nil {
+	if err != nil {
 		warning = err.Error()
+	} else {
+		warning = "version catalog was empty"
 	}
 	return fallbackMinecraftVersions(javaMajor), "fallback", warning
 }
@@ -3388,25 +7115,14 @@ func fetchMojangReleaseVersions(javaMajor int) ([]minecraftVersionOption, error)
 	if err := getJSON("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json", &manifest); err != nil {
 		return nil, err
 	}
-	options := make([]minecraftVersionOption, 0, len(manifest.Versions))
-	recommendedSet := false
+	ids := make([]string, 0, len(manifest.Versions))
 	for _, entry := range manifest.Versions {
 		if entry.ID == "" || entry.Type != "release" {
 			continue
 		}
-		minimum := javaMinimumForMinecraft(entry.ID)
-		if javaMajor > 0 && minimum > javaMajor {
-			continue
-		}
-		options = append(options, minecraftVersionOption{
-			ID:          entry.ID,
-			JavaMinimum: minimum,
-			Support:     "release",
-			Recommended: !recommendedSet,
-		})
-		recommendedSet = true
+		ids = append(ids, entry.ID)
 	}
-	return options, nil
+	return minecraftOptionsFromIDs(ids, "release", javaMajor), nil
 }
 
 func fetchPaperMinecraftVersions(javaMajor int) ([]minecraftVersionOption, error) {
@@ -3419,6 +7135,9 @@ func fetchPaperMinecraftVersions(javaMajor int) ([]minecraftVersionOption, error
 	for _, entry := range response.Versions {
 		id := entry.Version.ID
 		if id == "" {
+			continue
+		}
+		if !isStandardMinecraftRelease(id) {
 			continue
 		}
 		minimum := entry.Version.Java.Version.Minimum
@@ -3437,8 +7156,107 @@ func fetchPaperMinecraftVersions(javaMajor int) ([]minecraftVersionOption, error
 	return options, nil
 }
 
+func fetchFabricMinecraftVersions(javaMajor int) ([]minecraftVersionOption, error) {
+	var response []fabricGameVersion
+	if err := getJSON("https://meta.fabricmc.net/v2/versions/game", &response); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(response))
+	for _, entry := range response {
+		if !entry.Stable {
+			continue
+		}
+		ids = append(ids, entry.Version)
+	}
+	return minecraftOptionsFromIDs(ids, "stable", javaMajor), nil
+}
+
+func fetchQuiltMinecraftVersions(javaMajor int) ([]minecraftVersionOption, error) {
+	var response []quiltGameVersion
+	if err := getJSON("https://meta.quiltmc.org/v3/versions/game", &response); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(response))
+	for _, entry := range response {
+		if !entry.Stable {
+			continue
+		}
+		ids = append(ids, entry.Version)
+	}
+	return minecraftOptionsFromIDs(ids, "stable", javaMajor), nil
+}
+
+func fetchForgeMinecraftVersions(javaMajor int) ([]minecraftVersionOption, error) {
+	metadata, err := getText("https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml")
+	if err != nil {
+		return nil, err
+	}
+	matches := regexp.MustCompile(`<version>([^<]+)</version>`).FindAllStringSubmatch(metadata, -1)
+	ids := make([]string, 0, len(matches))
+	seen := map[string]bool{}
+	for i := len(matches) - 1; i >= 0; i-- {
+		artifactVersion := strings.TrimSpace(matches[i][1])
+		minecraftVersion := strings.SplitN(artifactVersion, "-", 2)[0]
+		if minecraftVersion == "" || seen[minecraftVersion] {
+			continue
+		}
+		seen[minecraftVersion] = true
+		ids = append(ids, minecraftVersion)
+	}
+	return minecraftOptionsFromIDs(ids, "forge", javaMajor), nil
+}
+
+func fetchNeoForgeMinecraftVersions(javaMajor int) ([]minecraftVersionOption, error) {
+	metadata, err := getText("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml")
+	if err != nil {
+		return nil, err
+	}
+	releases, err := fetchMojangReleaseVersions(javaMajor)
+	if err != nil {
+		return nil, err
+	}
+	options := make([]minecraftVersionOption, 0, len(releases))
+	for _, option := range releases {
+		prefix := neoForgeVersionPrefix(option.ID)
+		if prefix == "" || !mavenMetadataHasVersionPrefix(metadata, prefix) {
+			continue
+		}
+		option.Support = "neoforge"
+		option.Recommended = len(options) == 0
+		options = append(options, option)
+	}
+	return options, nil
+}
+
+func minecraftOptionsFromIDs(ids []string, support string, javaMajor int) []minecraftVersionOption {
+	options := make([]minecraftVersionOption, 0, len(ids))
+	seen := map[string]bool{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] || !isStandardMinecraftRelease(id) {
+			continue
+		}
+		minimum := javaMinimumForMinecraft(id)
+		if javaMajor > 0 && minimum > javaMajor {
+			continue
+		}
+		options = append(options, minecraftVersionOption{
+			ID:          id,
+			JavaMinimum: minimum,
+			Support:     support,
+			Recommended: len(options) == 0,
+		})
+		seen[id] = true
+	}
+	return options
+}
+
 func fallbackMinecraftVersions(javaMajor int) []minecraftVersionOption {
 	all := []minecraftVersionOption{
+		{ID: "26.2", JavaMinimum: 21, Support: "fallback"},
+		{ID: "26.1.2", JavaMinimum: 21, Support: "fallback"},
+		{ID: "1.21.8", JavaMinimum: 21, Support: "fallback"},
+		{ID: "1.21.7", JavaMinimum: 21, Support: "fallback"},
 		{ID: "1.21.6", JavaMinimum: 21, Support: "fallback"},
 		{ID: "1.21.5", JavaMinimum: 21, Support: "fallback"},
 		{ID: "1.21.4", JavaMinimum: 21, Support: "fallback"},
@@ -3457,6 +7275,12 @@ func fallbackMinecraftVersions(javaMajor int) []minecraftVersionOption {
 		filtered = append(filtered, option)
 	}
 	return filtered
+}
+
+func isStandardMinecraftRelease(version string) bool {
+	// Mojang's manifest can include special/event entries marked as "release".
+	// MineMux server setup targets Java Edition release IDs, including calendar-style 26.x IDs.
+	return minecraftReleaseIDPattern.MatchString(strings.TrimSpace(version))
 }
 
 func javaMinimumForMinecraft(version string) int {
@@ -3495,14 +7319,22 @@ func latestFallbackMinecraftVersion(javaMajor int) string {
 	return versions[0].ID
 }
 
-func resolveVanillaDownload(requestedVersion string) (string, string, string, error) {
+func latestCompatibleMinecraftVersion(loader string, javaMajor int) string {
+	target, _, _ := recommendedMinecraftUpdateTarget(loader, javaMajor)
+	if target != "" {
+		return target
+	}
+	return latestFallbackMinecraftVersion(javaMajor)
+}
+
+func resolveVanillaDownload(requestedVersion string, javaMajor int) (string, string, string, error) {
 	var manifest mojangVersionManifest
 	if err := getJSON("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json", &manifest); err != nil {
 		return "", "", "", err
 	}
 	version := requestedVersion
 	if version == "" || version == "latest-compatible" {
-		version = manifest.Latest["release"]
+		version = latestCompatibleMinecraftVersion("vanilla", javaMajor)
 	}
 	var versionURL string
 	for _, entry := range manifest.Versions {
@@ -3629,12 +7461,75 @@ func chooseMavenVersion(metadata, prefix string) (string, error) {
 	return "", fmt.Errorf("no installer version found for %s", prefix)
 }
 
+func mavenMetadataHasVersionPrefix(metadata, prefix string) bool {
+	matches := regexp.MustCompile(`<version>([^<]+)</version>`).FindAllStringSubmatch(metadata, -1)
+	for _, match := range matches {
+		if strings.HasPrefix(strings.TrimSpace(match[1]), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func neoForgeVersionPrefix(mcVersion string) string {
 	parts := strings.Split(mcVersion, ".")
-	if len(parts) >= 3 && parts[0] == "1" {
+	if len(parts) < 2 {
+		return ""
+	}
+	if parts[0] == "1" {
+		if len(parts) == 2 {
+			return parts[1] + ".0."
+		}
 		return parts[1] + "." + parts[2] + "."
 	}
-	return ""
+	if len(parts) >= 3 {
+		return parts[0] + "." + parts[1] + "." + parts[2] + "."
+	}
+	return parts[0] + "." + parts[1] + "."
+}
+
+func (a *app) searchMods(provider, query string, p *profile) (*modSearchResponse, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		provider = "all"
+	}
+	out := &modSearchResponse{Limit: 30}
+	var firstErr error
+	if provider == "all" || provider == "modrinth" {
+		res, err := searchModrinth(query, p)
+		if err != nil {
+			firstErr = err
+		} else {
+			out.Hits = append(out.Hits, res.Hits...)
+		}
+	}
+	if provider == "all" || provider == "curseforge" {
+		res, err := a.searchCurseForge(query, p)
+		if err != nil {
+			if provider == "curseforge" {
+				return nil, err
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
+			out.Hits = append(out.Hits, res.Hits...)
+		}
+	}
+	if provider != "all" && provider != "modrinth" && provider != "curseforge" {
+		return nil, fmt.Errorf("unsupported mod provider: %s", provider)
+	}
+	if len(out.Hits) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	sort.SliceStable(out.Hits, func(i, j int) bool {
+		if out.Hits[i].Compatible != out.Hits[j].Compatible {
+			return out.Hits[i].Compatible
+		}
+		return out.Hits[i].Downloads > out.Hits[j].Downloads
+	})
+	out.TotalHits = len(out.Hits)
+	return out, nil
 }
 
 func searchModrinth(query string, p *profile) (*modSearchResponse, error) {
@@ -3660,6 +7555,9 @@ func searchModrinth(query string, p *profile) (*modSearchResponse, error) {
 				continue
 			}
 			seen[id] = true
+			hit.Provider = "modrinth"
+			hit.ProjectIDAlt = hit.ProjectID
+			hit.WebsiteURL = "https://modrinth.com/mod/" + hit.Slug
 			hit = annotateModrinthCompatibility(hit, p)
 			out.Hits = append(out.Hits, hit)
 		}
@@ -3689,6 +7587,381 @@ func searchModrinthRaw(query, facets string, limit int) (*modSearchResponse, err
 		return nil, err
 	}
 	return &res, nil
+}
+
+func modrinthVersions(projectID string, p *profile) ([]modVersionOption, error) {
+	endpoint, _ := url.Parse("https://api.modrinth.com/v2/project/" + url.PathEscape(projectID) + "/version")
+	q := endpoint.Query()
+	if p != nil && strings.TrimSpace(p.Loader) != "" {
+		q.Set("loaders", jsonArrayString([]string{p.Loader}))
+	}
+	if p != nil && strings.TrimSpace(p.MinecraftVersion) != "" && p.MinecraftVersion != "latest-compatible" {
+		q.Set("game_versions", jsonArrayString([]string{p.MinecraftVersion}))
+	}
+	endpoint.RawQuery = q.Encode()
+	var versions []modrinthVersion
+	if err := getJSON(endpoint.String(), &versions); err != nil {
+		return nil, err
+	}
+	out := make([]modVersionOption, 0, len(versions))
+	for i, version := range versions {
+		fileName := ""
+		downloads := 0
+		if file, err := primaryModrinthFile(&version); err == nil {
+			fileName = file.Filename
+			downloads = int(file.Size)
+		}
+		out = append(out, modVersionOption{
+			Provider:      "modrinth",
+			ID:            version.ID,
+			Name:          version.Name,
+			VersionNumber: version.VersionNumber,
+			FileName:      fileName,
+			GameVersions:  version.GameVersions,
+			Loaders:       version.Loaders,
+			ReleaseType:   version.VersionType,
+			Downloads:     downloads,
+			Primary:       i == 0,
+		})
+	}
+	return out, nil
+}
+
+func (a *app) curseForgeKeyPath() string {
+	return filepath.Join(a.paths().Runtime, "curseforge-api-key")
+}
+
+func (a *app) curseForgeAPIKey() string {
+	for _, key := range []string{"CURSEFORGE_API_KEY", "CF_API_KEY"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	data, err := os.ReadFile(a.curseForgeKeyPath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func (a *app) getCurseForgeJSON(endpoint string, target any) error {
+	key := a.curseForgeAPIKey()
+	if key == "" {
+		return errors.New("CurseForge API key is not configured")
+	}
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-api-key", key)
+	res, err := networkClient.Do(req)
+	if err != nil {
+		return networkError(endpoint, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
+		return fmt.Errorf("CurseForge request failed: %s %s", res.Status, strings.TrimSpace(string(body)))
+	}
+	return json.NewDecoder(res.Body).Decode(target)
+}
+
+func (a *app) searchCurseForge(query string, p *profile) (*modSearchResponse, error) {
+	endpoint, _ := url.Parse("https://api.curseforge.com/v1/mods/search")
+	q := endpoint.Query()
+	q.Set("gameId", "432")
+	q.Set("classId", "6")
+	q.Set("searchFilter", query)
+	q.Set("pageSize", "24")
+	q.Set("sortField", "2")
+	q.Set("sortOrder", "desc")
+	if p != nil && p.MinecraftVersion != "" && p.MinecraftVersion != "latest-compatible" {
+		q.Set("gameVersion", p.MinecraftVersion)
+	}
+	loader := ""
+	if p != nil {
+		loader = p.Loader
+	}
+	if loaderType := curseForgeModLoaderType(loader); loaderType > 0 {
+		q.Set("modLoaderType", strconv.Itoa(loaderType))
+	}
+	endpoint.RawQuery = q.Encode()
+	var response curseForgeSearchResponse
+	if err := a.getCurseForgeJSON(endpoint.String(), &response); err != nil {
+		return nil, err
+	}
+	out := &modSearchResponse{Limit: 24, TotalHits: response.Pagination.TotalCount}
+	for _, mod := range response.Data {
+		hit := curseForgeModToSearchHit(mod, p)
+		if hit.ServerSide == "unsupported" {
+			continue
+		}
+		out.Hits = append(out.Hits, hit)
+	}
+	return out, nil
+}
+
+func curseForgeModToSearchHit(mod curseForgeMod, p *profile) modSearchHit {
+	categories := []string{}
+	for _, category := range mod.Categories {
+		label := strings.TrimSpace(category.Name)
+		if label == "" {
+			label = strings.TrimSpace(category.Slug)
+		}
+		if label != "" && !stringSliceContains(categories, label) {
+			categories = append(categories, label)
+		}
+	}
+	versions := []string{}
+	loaders := []string{}
+	latestFile := ""
+	for _, file := range mod.LatestFilesIndexes {
+		if file.GameVersion != "" && !stringSliceContains(versions, file.GameVersion) {
+			versions = append(versions, file.GameVersion)
+		}
+		loader := curseForgeLoaderName(file.ModLoader)
+		if loader != "" && !stringSliceContains(loaders, loader) {
+			loaders = append(loaders, loader)
+		}
+		if latestFile == "" && file.Filename != "" {
+			latestFile = file.Filename
+		}
+	}
+	author := ""
+	if len(mod.Authors) > 0 {
+		author = mod.Authors[0].Name
+	}
+	icon := mod.Logo.ThumbnailURL
+	if icon == "" {
+		icon = mod.Logo.URL
+	}
+	id := strconv.Itoa(mod.ID)
+	hit := modSearchHit{
+		Provider:         "curseforge",
+		ProjectID:        id,
+		ProjectIDAlt:     id,
+		Slug:             mod.Slug,
+		Title:            mod.Name,
+		Description:      mod.Summary,
+		ProjectType:      "mod",
+		Categories:       categories,
+		Versions:         versions,
+		Downloads:        mod.DownloadCount,
+		ClientSide:       "unknown",
+		ServerSide:       "unknown",
+		IconURL:          icon,
+		LatestVersion:    latestFile,
+		WebsiteURL:       mod.Links.WebsiteURL,
+		Author:           author,
+		SupportedLoaders: loaders,
+	}
+	versionOK := p == nil || p.MinecraftVersion == "" || p.MinecraftVersion == "latest-compatible" || stringSliceContains(versions, p.MinecraftVersion)
+	loaderOK := p == nil || p.Loader == "" || curseForgeLoaderMatches(p.Loader, loaders)
+	hit.Compatible = versionOK && loaderOK
+	switch {
+	case hit.Compatible:
+		hit.CompatibilityReason = "Compatible with this server"
+	case !versionOK && !loaderOK:
+		hit.CompatibilityReason = fmt.Sprintf("No file for Minecraft %s and %s", p.MinecraftVersion, displayLoader(p.Loader))
+	case !versionOK:
+		hit.CompatibilityReason = "No file for Minecraft " + p.MinecraftVersion
+	case !loaderOK:
+		if len(loaders) == 0 {
+			hit.CompatibilityReason = "No loader metadata from CurseForge"
+		} else {
+			hit.CompatibilityReason = fmt.Sprintf("Requires %s, not %s", strings.Join(loaders, ", "), displayLoader(p.Loader))
+		}
+	}
+	return hit
+}
+
+func (a *app) curseForgeVersions(projectID string, p *profile) ([]modVersionOption, error) {
+	modID, err := strconv.Atoi(strings.TrimSpace(projectID))
+	if err != nil {
+		return nil, errors.New("CurseForge projectId must be numeric")
+	}
+	files, err := a.curseForgeFiles(modID, p)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]modVersionOption, 0, len(files))
+	for i, file := range files {
+		out = append(out, modVersionOption{
+			Provider:      "curseforge",
+			ID:            strconv.Itoa(file.ID),
+			Name:          file.DisplayName,
+			VersionNumber: file.DisplayName,
+			FileName:      file.FileName,
+			GameVersions:  file.GameVersions,
+			ReleaseType:   curseForgeReleaseType(file.ReleaseType),
+			Downloads:     file.DownloadCount,
+			Date:          file.FileDate,
+			Primary:       i == 0,
+		})
+	}
+	return out, nil
+}
+
+func (a *app) curseForgeFiles(modID int, p *profile) ([]curseForgeFile, error) {
+	endpoint, _ := url.Parse(fmt.Sprintf("https://api.curseforge.com/v1/mods/%d/files", modID))
+	q := endpoint.Query()
+	q.Set("pageSize", "50")
+	if p != nil && p.MinecraftVersion != "" && p.MinecraftVersion != "latest-compatible" {
+		q.Set("gameVersion", p.MinecraftVersion)
+	}
+	loader := ""
+	if p != nil {
+		loader = p.Loader
+	}
+	if loaderType := curseForgeModLoaderType(loader); loaderType > 0 {
+		q.Set("modLoaderType", strconv.Itoa(loaderType))
+	}
+	endpoint.RawQuery = q.Encode()
+	var response curseForgeFilesResponse
+	if err := a.getCurseForgeJSON(endpoint.String(), &response); err != nil {
+		return nil, err
+	}
+	return response.Data, nil
+}
+
+func (a *app) curseForgeFile(modID, fileID int) (curseForgeFile, error) {
+	var response curseForgeFileResponse
+	err := a.getCurseForgeJSON(fmt.Sprintf("https://api.curseforge.com/v1/mods/%d/files/%d", modID, fileID), &response)
+	return response.Data, err
+}
+
+func (a *app) curseForgeDownloadURL(modID, fileID int) (string, error) {
+	var response curseForgeDownloadURLResponse
+	err := a.getCurseForgeJSON(fmt.Sprintf("https://api.curseforge.com/v1/mods/%d/files/%d/download-url", modID, fileID), &response)
+	return response.Data, err
+}
+
+func (a *app) installCurseForgeProjectFor(serverID string, p *profile, projectID, versionID string) ([]lockedInstall, error) {
+	modID, err := strconv.Atoi(strings.TrimSpace(projectID))
+	if err != nil {
+		return nil, errors.New("CurseForge projectId must be numeric")
+	}
+	var file curseForgeFile
+	if strings.TrimSpace(versionID) != "" {
+		fileID, err := strconv.Atoi(strings.TrimSpace(versionID))
+		if err != nil {
+			return nil, errors.New("CurseForge versionId must be numeric")
+		}
+		file, err = a.curseForgeFile(modID, fileID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		files, err := a.curseForgeFiles(modID, p)
+		if err != nil {
+			return nil, err
+		}
+		if len(files) == 0 {
+			return nil, errors.New("no compatible CurseForge file found")
+		}
+		file = files[0]
+		for _, candidate := range files {
+			if candidate.ReleaseType == 1 {
+				file = candidate
+				break
+			}
+		}
+	}
+	downloadURL := strings.TrimSpace(file.DownloadURL)
+	if downloadURL == "" {
+		downloadURL, err = a.curseForgeDownloadURL(modID, file.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if downloadURL == "" {
+		return nil, errors.New("CurseForge did not provide a download URL for this file")
+	}
+	targetFolder := targetFolderForLoader(p.Loader)
+	targetDir := filepath.Join(a.serverDir(serverID), targetFolder)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return nil, err
+	}
+	targetPath := filepath.Join(targetDir, filepath.Base(file.FileName))
+	if err := downloadFile(downloadURL, targetPath); err != nil {
+		return nil, err
+	}
+	item := lockedInstall{
+		Source:       "curseforge",
+		ProjectID:    strconv.Itoa(modID),
+		VersionID:    strconv.Itoa(file.ID),
+		Name:         file.DisplayName,
+		FileName:     filepath.Base(file.FileName),
+		TargetFolder: targetFolder,
+		InstalledAt:  time.Now().UTC(),
+		PhoneSafety:  phoneSafety(file.DisplayName, file.FileLength),
+	}
+	lock, _ := a.loadLockfileFor(serverID)
+	lock.MinecraftVersion = p.MinecraftVersion
+	lock.Loader = p.Loader
+	lock.Installed = upsertInstall(lock.Installed, item)
+	if err := a.saveLockfileFor(serverID, lock); err != nil {
+		return nil, err
+	}
+	return []lockedInstall{item}, nil
+}
+
+func curseForgeModLoaderType(loader string) int {
+	switch strings.ToLower(strings.TrimSpace(loader)) {
+	case "forge":
+		return 1
+	case "fabric":
+		return 4
+	case "quilt":
+		return 5
+	case "neoforge":
+		return 6
+	default:
+		return 0
+	}
+}
+
+func curseForgeLoaderName(value int) string {
+	switch value {
+	case 1:
+		return "Forge"
+	case 4:
+		return "Fabric"
+	case 5:
+		return "Quilt"
+	case 6:
+		return "NeoForge"
+	default:
+		return ""
+	}
+}
+
+func curseForgeLoaderMatches(loader string, names []string) bool {
+	if len(names) == 0 {
+		return true
+	}
+	want := strings.ToLower(displayLoader(loader))
+	for _, name := range names {
+		if strings.EqualFold(strings.TrimSpace(name), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func curseForgeReleaseType(value int) string {
+	switch value {
+	case 1:
+		return "release"
+	case 2:
+		return "beta"
+	case 3:
+		return "alpha"
+	default:
+		return "unknown"
+	}
 }
 
 func annotateModrinthCompatibility(hit modSearchHit, p *profile) modSearchHit {
@@ -3784,6 +8057,13 @@ func stringSliceContains(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 func (a *app) installModrinthProject(p *profile, projectID, versionID string, seen map[string]bool) ([]lockedInstall, error) {
@@ -4930,6 +9210,93 @@ func unzipInto(sourceZip, targetDir string) error {
 		cleanTarget := filepath.Clean(target)
 		if !strings.HasPrefix(cleanTarget, filepath.Clean(targetDir)+string(os.PathSeparator)) {
 			return fmt.Errorf("unsafe path in backup: %s", file.Name)
+		}
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(cleanTarget, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(cleanTarget), 0o755); err != nil {
+			return err
+		}
+		src, err := file.Open()
+		if err != nil {
+			return err
+		}
+		dst, err := os.Create(cleanTarget)
+		if err != nil {
+			src.Close()
+			return err
+		}
+		_, copyErr := io.Copy(dst, src)
+		closeErr := dst.Close()
+		src.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
+}
+
+func unzipWorldArchive(sourceZip, serverDir, worldName string) error {
+	reader, err := zip.OpenReader(sourceZip)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	stripPrefix := ""
+	rootWorld := false
+	topLevelWithLevel := map[string]bool{}
+	for _, file := range reader.File {
+		name := filepath.ToSlash(strings.TrimPrefix(file.Name, "/"))
+		if name == "" || strings.Contains(name, "../") {
+			continue
+		}
+		parts := strings.Split(name, "/")
+		if len(parts) == 1 && strings.EqualFold(parts[0], "level.dat") {
+			rootWorld = true
+			break
+		}
+		if len(parts) >= 2 && strings.EqualFold(parts[1], "level.dat") {
+			topLevelWithLevel[parts[0]] = true
+		}
+		if strings.HasPrefix(name, "region/") || strings.HasPrefix(name, "DIM-1/") || strings.HasPrefix(name, "DIM1/") {
+			rootWorld = true
+			break
+		}
+	}
+	targetDir := serverDir
+	if rootWorld {
+		targetDir = filepath.Join(serverDir, worldName)
+	} else if len(topLevelWithLevel) == 1 {
+		for top := range topLevelWithLevel {
+			stripPrefix = strings.TrimSuffix(top, "/") + "/"
+		}
+		targetDir = filepath.Join(serverDir, worldName)
+	}
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return err
+	}
+	for _, file := range reader.File {
+		name := filepath.ToSlash(strings.TrimPrefix(file.Name, "/"))
+		if stripPrefix != "" {
+			if !strings.HasPrefix(name, stripPrefix) {
+				continue
+			}
+			name = strings.TrimPrefix(name, stripPrefix)
+		}
+		if name == "" {
+			continue
+		}
+		target := filepath.Join(targetDir, filepath.FromSlash(name))
+		cleanTarget := filepath.Clean(target)
+		cleanRoot := filepath.Clean(targetDir)
+		if cleanTarget != cleanRoot && !strings.HasPrefix(cleanTarget, cleanRoot+string(os.PathSeparator)) {
+			return fmt.Errorf("unsafe path in world upload: %s", file.Name)
 		}
 		if file.FileInfo().IsDir() {
 			if err := os.MkdirAll(cleanTarget, 0o755); err != nil {
