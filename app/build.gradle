@@ -12,6 +12,17 @@ ext {
     packageVariant = System.getenv("TERMUX_PACKAGE_VARIANT") ?: "apt-android-7" // Default: "apt-android-7"
 }
 
+def minemuxLocalProperties = new Properties()
+def minemuxLocalPropertiesFile = rootProject.file("local.properties")
+if (minemuxLocalPropertiesFile.exists()) {
+    minemuxLocalPropertiesFile.withInputStream { minemuxLocalProperties.load(it) }
+}
+def minemuxReleaseStoreFile = (project.findProperty("minemuxReleaseStoreFile") ?: minemuxLocalProperties.getProperty("minemuxReleaseStoreFile"))?.toString()
+def minemuxReleaseKeyAlias = (project.findProperty("minemuxReleaseKeyAlias") ?: minemuxLocalProperties.getProperty("minemuxReleaseKeyAlias"))?.toString()
+def minemuxReleaseStorePassword = (project.findProperty("minemuxReleaseStorePassword") ?: minemuxLocalProperties.getProperty("minemuxReleaseStorePassword"))?.toString()
+def minemuxReleaseKeyPassword = (project.findProperty("minemuxReleaseKeyPassword") ?: minemuxLocalProperties.getProperty("minemuxReleaseKeyPassword"))?.toString()
+def minemuxReleaseSigningReady = minemuxReleaseStoreFile && minemuxReleaseKeyAlias && minemuxReleaseStorePassword && minemuxReleaseKeyPassword
+
 android {
     namespace "com.termux"
 
@@ -44,7 +55,7 @@ android {
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
         versionCode 118
-        versionName "0.118.0"
+        versionName "0.1.0-mvp.1"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
@@ -52,7 +63,7 @@ android {
         buildConfigField "String", "TERMUX_PACKAGE_VARIANT", "\"" + project.ext.packageVariant + "\"" // Used by TermuxApplication class
 
         manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.termux"
-        manifestPlaceholders.TERMUX_APP_NAME = "Termux"
+        manifestPlaceholders.TERMUX_APP_NAME = "MineMux"
         manifestPlaceholders.TERMUX_API_APP_NAME = "Termux:API"
         manifestPlaceholders.TERMUX_BOOT_APP_NAME = "Termux:Boot"
         manifestPlaceholders.TERMUX_FLOAT_APP_NAME = "Termux:Float"
@@ -84,10 +95,21 @@ android {
             storePassword 'xrj45yWGLbsO7W0v'
             keyPassword 'xrj45yWGLbsO7W0v'
         }
+        release {
+            if (minemuxReleaseSigningReady) {
+                storeFile file(minemuxReleaseStoreFile)
+                keyAlias minemuxReleaseKeyAlias
+                storePassword minemuxReleaseStorePassword
+                keyPassword minemuxReleaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
+            if (minemuxReleaseSigningReady) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled true
             shrinkResources false // Reproducible builds
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
@@ -132,10 +154,10 @@ android {
         variant.outputs.all { output ->
             if (variant.buildType.name == "debug") {
                 def abi = output.getFilter(com.android.build.OutputFile.ABI)
-                outputFileName = new File("termux-app_" + (apkVersionTag ? apkVersionTag : project.ext.packageVariant + "-" + "debug") + "_" + (abi ? abi : "universal") + ".apk")
+                outputFileName = new File("minemux_" + (apkVersionTag ? apkVersionTag : project.ext.packageVariant + "-" + "debug") + "_" + (abi ? abi : "universal") + ".apk")
             } else if (variant.buildType.name == "release") {
                 def abi = output.getFilter(com.android.build.OutputFile.ABI)
-                outputFileName = new File("termux-app_" + (apkVersionTag ? apkVersionTag : project.ext.packageVariant + "-" + "release") + "_" + (abi ? abi : "universal") + ".apk")
+                outputFileName = new File("minemux_" + (apkVersionTag ? apkVersionTag : project.ext.packageVariant + "-" + "release") + "_" + (abi ? abi : "universal") + ".apk")
             }
         }
     }

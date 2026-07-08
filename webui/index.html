@@ -1,0 +1,3320 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MineMux</title>
+  <link rel="icon" type="image/png" href="/assets/app-icon.png">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0c0e;
+      --panel: #141518;
+      --panel-2: #202228;
+      --line: #343841;
+      --text: #f6f3ec;
+      --muted: #b8b4aa;
+      --dim: #858176;
+      --green: #0db50d;
+      --blue: #4b9cff;
+      --amber: #d59b32;
+      --red: #d64040;
+      --warn: #d59b32;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 15% 0%, rgba(75,156,255,.10), transparent 30rem), radial-gradient(circle at 90% 8%, rgba(213,155,50,.08), transparent 26rem), var(--bg); }
+    button, input, select, textarea { font: inherit; }
+    .app { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100vh; }
+    aside { border-right: 1px solid var(--line); background: #101114; padding: 18px; position: sticky; top: 0; height: 100vh; }
+    .brand { display: flex; gap: 10px; align-items: center; font-size: 24px; font-weight: 800; margin-bottom: 22px; }
+    .logo { width: 38px; height: 38px; border-radius: 8px; border: 1px solid rgba(13,181,13,.45); object-fit: cover; background: #050505; }
+    .title-logo { width: 42px; height: 42px; border-radius: 8px; border: 1px solid rgba(13,181,13,.45); object-fit: cover; background: #050505; }
+    nav { display: grid; gap: 8px; }
+    .nav { border: 1px solid transparent; color: var(--muted); background: transparent; border-radius: 8px; padding: 12px 14px; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .nav:hover { color: var(--text); background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.08); }
+    .nav.active { color: #fff; background: rgba(13,181,13,.16); border-color: rgba(13,181,13,.45); box-shadow: inset 3px 0 0 var(--green); }
+    main { padding: 20px; max-width: 1320px; width: 100%; margin: 0 auto; }
+    header { display: flex; justify-content: space-between; align-items: start; gap: 12px; margin-bottom: 16px; }
+    .header-tools { justify-content: flex-end; }
+    .server-switcher { width: auto; min-width: 190px; max-width: 290px; }
+    h1 { margin: 0; font-size: clamp(26px, 3vw, 40px); line-height: 1; }
+    h2 { margin: 0 0 12px; font-size: 19px; }
+    h3 { margin: 0; font-size: 15px; color: var(--muted); font-weight: 650; }
+    .muted { color: var(--muted); }
+    .dim { color: var(--dim); }
+    .grid { display: grid; gap: 12px; }
+    .cols { display: grid; grid-template-columns: 1.15fr .85fr; gap: 12px; align-items: start; }
+    .servers-layout { display: grid; grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); gap: 14px; align-items: start; }
+    .server-list-card { position: sticky; top: 20px; }
+    .server-row { display: grid; gap: 10px; cursor: pointer; }
+    .server-row.selected { border-color: var(--green); box-shadow: inset 3px 0 0 var(--green); }
+    .server-row-title { font-size: 18px; font-weight: 850; }
+    .detail-hero { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; align-items: center; }
+    .detail-hero h2 { margin: 0 0 6px; font-size: 26px; }
+    .server-detail-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, .9fr); gap: 12px; align-items: start; }
+    .server-kv-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .mini-card { border: 1px solid var(--line); background: #101114; border-radius: 8px; padding: 12px; min-height: 74px; }
+    .mini-card b { display: block; margin-top: 5px; font-size: 17px; }
+    .detail-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 8px; }
+    .property-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+    .section-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .inline-note { border: 1px solid rgba(75,156,255,.3); background: rgba(75,156,255,.08); color: #e4efff; border-radius: 8px; padding: 12px; }
+    .hint { color: var(--dim); font-size: 12px; line-height: 1.35; }
+    .tight-list { display: grid; gap: 6px; }
+    .compact-item { padding: 10px; }
+    .map-link { color: var(--green); font-weight: 800; text-decoration: none; }
+    .metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+    .card { background: linear-gradient(180deg, var(--panel), #101114); border: 1px solid var(--line); border-radius: 8px; padding: 16px; box-shadow: 0 18px 40px rgba(0,0,0,.22); }
+    .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .grow { flex: 1; min-width: 0; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 6px 10px; background: rgba(166,166,166,.12); color: var(--muted); font-size: 12px; font-weight: 800; }
+    .pill.green { background: rgba(13,181,13,.16); color: var(--green); }
+    .pill.blue { background: rgba(75,156,255,.16); color: var(--blue); }
+    .pill.amber { background: rgba(213,155,50,.16); color: var(--amber); }
+    .pill.red { background: rgba(214,64,64,.15); color: #ff7777; }
+    .dot { width: 8px; height: 8px; background: currentColor; border-radius: 50%; display: inline-block; }
+    .runtime { width: 52px; height: 52px; border-radius: 8px; display: grid; place-items: center; background: rgba(13,181,13,.12); border: 1px solid rgba(13,181,13,.35); color: var(--green); font-weight: 900; }
+    .metric { min-height: 114px; display: grid; align-content: space-between; }
+    .metric .value { font-size: 24px; font-weight: 850; }
+    .spark { height: 34px; width: 100%; }
+    .spark.empty { opacity: .25; }
+    .spark svg { width: 100%; height: 34px; display: block; overflow: visible; }
+    .spark polygon { fill: rgba(13,181,13,.15); }
+    .spark polyline { fill: none; stroke: var(--green); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+    .actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; margin-top: 12px; }
+    button { border: 1px solid var(--line); background: var(--panel-2); color: var(--text); border-radius: 8px; padding: 11px 13px; cursor: pointer; font-weight: 750; transition: border-color .15s ease, background .15s ease, transform .15s ease; }
+    button:hover { border-color: var(--green); }
+    button:active { transform: translateY(1px); }
+    button.primary { background: var(--green); border-color: var(--green); color: #fff; }
+    button.danger { background: var(--red); border-color: var(--red); color: #fff; }
+    button:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid rgba(75,156,255,.75); outline-offset: 2px; }
+    input, select, textarea { width: 100%; border: 1px solid var(--line); background: #0e0f12; color: var(--text); border-radius: 8px; padding: 11px 12px; }
+    textarea { min-height: 120px; resize: vertical; }
+    label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 750; }
+    .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+    .slider-field { grid-column: 1 / -1; gap: 10px; }
+    .slider-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .slider-top b { color: var(--text); font-size: 15px; }
+    input[type="range"] { padding: 0; accent-color: var(--green); }
+    .range-ticks { display: flex; justify-content: space-between; gap: 8px; color: var(--dim); font-size: 11px; font-weight: 750; }
+    .setup-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr); gap: 12px; align-items: start; }
+    .setup-section { display: grid; gap: 10px; }
+    .choice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+    .toggle-row { display: flex; align-items: start; gap: 10px; border: 1px solid var(--line); background: #101114; border-radius: 8px; padding: 12px; color: var(--text); font-size: 14px; font-weight: 750; }
+    .toggle-row input { width: auto; margin-top: 3px; }
+    .toggle-row span { display: block; color: var(--muted); font-size: 12px; font-weight: 650; margin-top: 3px; }
+    .quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+    .provider-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+    .provider-tabs button.active { border-color: var(--green); background: rgba(13,181,13,.16); color: var(--green); }
+    .mod-browser { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .42fr); gap: 12px; align-items: start; }
+    .mod-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; }
+    .mod-icon { width: 54px; height: 54px; border-radius: 8px; object-fit: cover; background: #07080a; border: 1px solid var(--line); }
+    .mod-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .mod-version-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; }
+    .progress-shell { border: 1px solid var(--line); background: #101114; border-radius: 8px; padding: 12px; display: grid; gap: 10px; }
+    .progress-track { height: 8px; border-radius: 999px; background: #08090b; overflow: hidden; border: 1px solid rgba(255,255,255,.08); }
+    .progress-fill { height: 100%; width: 8%; background: var(--green); transition: width .4s ease; }
+    .drop-zone { border: 1px dashed rgba(184,180,170,.34); background: rgba(255,255,255,.025); border-radius: 8px; padding: 14px; display: grid; gap: 6px; }
+    .terminal-output { min-height: 420px; height: 58vh; }
+    .empty-state { border: 1px dashed rgba(184,180,170,.28); background: rgba(255,255,255,.025); border-radius: 8px; padding: 18px; display: grid; gap: 8px; }
+    .empty-state h3 { color: var(--text); font-size: 17px; }
+    .empty-state p { margin: 0; }
+    .empty-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .world-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+    .world-toolbar select { width: auto; min-width: 180px; }
+    .world-limit { min-width: min(100%, 340px); display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; font-weight: 800; }
+    .world-limit input { min-width: 150px; }
+    .world-limit b { color: var(--text); white-space: nowrap; }
+    .world-zoom-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .world-canvas-wrap { height: min(68vh, 720px); min-height: 420px; overflow: hidden; padding: 0; position: relative; }
+    .world-canvas { width: 100%; height: 100%; display: block; background: #050608; cursor: grab; touch-action: none; image-rendering: pixelated; }
+    .world-canvas.dragging { cursor: grabbing; }
+    .world-canvas.trimming { cursor: crosshair; }
+    .world-legend { position: absolute; left: 12px; bottom: 12px; max-width: min(460px, calc(100% - 24px)); background: rgba(16,17,20,.88); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; pointer-events: none; }
+    .world-coordinates { position: absolute; right: 12px; top: 12px; max-width: min(520px, calc(100% - 24px)); background: rgba(5,6,8,.9); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; pointer-events: none; color: var(--text); font-size: 12px; font-weight: 900; box-shadow: 0 12px 32px rgba(0,0,0,.28); }
+    .world-coordinates .muted { font-size: 11px; font-weight: 800; }
+    .world-trim-panel { margin-top: 10px; display: grid; gap: 8px; }
+    .world-trim-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    .list { display: grid; gap: 8px; }
+    .item { border: 1px solid var(--line); background: #101114; border-radius: 8px; padding: 12px; }
+    .item.active { border-color: var(--green); }
+    .file-breadcrumb { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 0 12px; }
+    .file-breadcrumb button { padding: 7px 9px; }
+    .file-type { color: var(--dim); font-size: 12px; font-weight: 800; letter-spacing: 0; }
+    .console { background: #07080a; border: 1px solid var(--line); border-radius: 8px; padding: 12px; height: 280px; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+    .hidden { display: none !important; }
+    .notice { position: fixed; right: 18px; bottom: 18px; max-width: 380px; background: #101114; border: 1px solid var(--line); border-left: 4px solid var(--green); border-radius: 8px; padding: 12px 14px; box-shadow: 0 18px 50px rgba(0,0,0,.35); z-index: 20; }
+    .notice.error { border-left-color: var(--red); }
+    .file-input { display: none; }
+    iframe { width: 100%; height: 420px; border: 1px solid var(--line); border-radius: 8px; background: #080808; }
+    @media (max-width: 900px) {
+      .app { grid-template-columns: 1fr; }
+      aside { position: fixed; inset: auto 10px 10px; height: auto; z-index: 10; border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
+      .brand { display: none; }
+      nav { grid-auto-flow: column; grid-auto-columns: minmax(86px, 1fr); grid-template-columns: none; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+      nav::-webkit-scrollbar { display: none; }
+      .nav { text-align: center; padding: 10px 4px; font-size: 11px; }
+      .nav.active { box-shadow: inset 0 -3px 0 var(--green); }
+      main { padding: 16px 12px 104px; }
+      header { align-items: stretch; flex-direction: column; }
+      .header-tools { justify-content: space-between; }
+      .server-switcher { min-width: 0; flex: 1; }
+      .cols, .metrics, .servers-layout, .server-detail-grid, .setup-grid { grid-template-columns: 1fr; }
+      .server-list-card { position: static; }
+      .actions { grid-template-columns: repeat(2, 1fr); }
+      .server-kv-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 560px) {
+      .cols, .metrics, .actions, .detail-hero, .server-kv-grid { grid-template-columns: 1fr; }
+      .nav { font-size: 10px; }
+      .world-canvas-wrap { min-height: 330px; height: 58vh; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand"><img class="logo" src="/assets/app-icon.png" alt=""><span>MineMux</span></div>
+    <nav id="nav"></nav>
+  </aside>
+  <main>
+    <header>
+      <div class="row">
+        <img class="title-logo" src="/assets/app-icon.png" alt="">
+        <div>
+          <h1 id="title">Dashboard</h1>
+          <div class="muted" id="subtitle">Phone-hosted Minecraft server control.</div>
+        </div>
+      </div>
+      <div class="row header-tools">
+        <select id="server-switcher" class="server-switcher hidden" aria-label="Selected server"></select>
+        <span class="pill" id="controller-pill"><span class="dot"></span>Loading</span>
+        <button id="refresh">Refresh</button>
+      </div>
+    </header>
+    <section id="content"></section>
+  </main>
+</div>
+<div id="notice" class="notice hidden"></div>
+<input id="backup-upload" class="file-input" type="file" accept=".zip">
+<input id="server-upload" class="file-input" type="file" multiple>
+<input id="server-folder-upload" class="file-input" type="file" webkitdirectory directory multiple>
+<input id="mod-upload" class="file-input" type="file" accept=".jar">
+<input id="server-icon-upload" class="file-input" type="file" accept="image/png">
+<input id="resource-pack-upload" class="file-input" type="file" accept=".zip">
+<input id="setup-world-upload" class="file-input" type="file" accept=".zip">
+<script>
+const state = {
+  page: new URLSearchParams(location.search).get("page") || "dashboard",
+  status: null,
+  servers: [],
+  backups: [],
+  mods: null,
+  modsByServer: {},
+  modProvider: "all",
+  modProviders: null,
+  setupWorldUpload: null,
+  setupWorldUploading: false,
+  setupProgress: null,
+  setupProgressTimer: null,
+  termux: { info: null, cwd: "", output: "", history: [], historyIndex: -1 },
+  updates: null,
+  files: [],
+  fileEditor: null,
+  filePath: "",
+  world: {
+    data: null,
+    dimension: "overworld",
+    scale: 0.35,
+    offsetX: 0,
+    offsetY: 0,
+    dragging: false,
+    centered: false,
+    limit: 10000,
+    bitmap: null,
+    detailCache: new Map(),
+    detailToken: 0,
+    detailRequestKey: "",
+    detailTimer: null,
+    detailInflightTiles: new Set(),
+    detailLoadedTiles: new Set(),
+    detailFailedTiles: new Map(),
+    loadToken: 0,
+    players: [],
+    playersToken: 0,
+    playersLoading: false,
+    pendingJump: null,
+    pointer: null,
+    trimMode: false,
+    trimAreas: [],
+    trimDraft: null,
+    trimAnchor: null,
+    drawingTrim: false
+  },
+  selectedServerId: "",
+  options: null,
+  busy: false,
+  renderedPage: "",
+  renderedDashboardInstalled: null,
+  renderedDashboardRunning: null,
+  commandHistory: [],
+  commandHistoryIndex: -1,
+  history: {
+    tps: [],
+    players: [],
+    cpu: [],
+    memory: [],
+    disk: []
+  }
+};
+
+const pages = [
+  ["dashboard", "Dashboard"],
+  ["servers", "Servers"],
+  ["setup", "Setup"],
+  ["backups", "Backups"],
+  ["mods", "Mods"],
+  ["updates", "Updates"],
+  ["world", "World"],
+  ["files", "Files"],
+  ["settings", "Settings"],
+  ["termux", "Termux"],
+  ["console", "Console"]
+];
+if (!pages.some(([id]) => id === state.page)) state.page = "dashboard";
+
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const pct = value => Number(value || 0).toFixed(value > 10 ? 0 : 1) + "%";
+const bytes = value => {
+  value = Number(value || 0);
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) { value /= 1024; index++; }
+  return `${value.toFixed(index ? 1 : 0)} ${units[index]}`;
+};
+const q = params => new URLSearchParams(params).toString();
+const RAM_STEPS = [1024, 1536, 2048, 2560, 3072, 4096, 5120, 6144, 8192];
+const WORLD_LIMIT_STEPS = [1000, 5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000];
+const WORLD_MIN_SCALE = 0.025;
+const WORLD_MAX_SCALE = 48;
+const WORLD_DETAIL_SCALE = WORLD_MIN_SCALE;
+const WORLD_DETAIL_LIMIT = 5000;
+const WORLD_DETAIL_TILE_CHUNKS = 32;
+const WORLD_DETAIL_CONCURRENCY = 3;
+const WORLD_DETAIL_RETRY_MS = 8000;
+const formatRam = value => value % 1024 === 0 ? `${value / 1024} GB` : `${(value / 1024).toFixed(1)} GB`;
+function closestRamIndex(value) {
+  value = Number(value || RAM_STEPS[2]);
+  let best = 0;
+  let distance = Infinity;
+  RAM_STEPS.forEach((option, index) => {
+    const nextDistance = Math.abs(option - value);
+    if (nextDistance < distance) {
+      best = index;
+      distance = nextDistance;
+    }
+  });
+  return best;
+}
+function setupMemoryValue() {
+  const slider = $("setup-memory");
+  const index = Math.max(0, Math.min(RAM_STEPS.length - 1, Number(slider?.value || 0)));
+  return RAM_STEPS[index] || RAM_STEPS[2];
+}
+function updateSetupMemoryReadout() {
+  const readout = $("setup-memory-readout");
+  if (readout) readout.textContent = `${formatRam(setupMemoryValue())} (${setupMemoryValue()} MB)`;
+}
+function closestWorldLimitIndex(value) {
+  value = Number(value || WORLD_LIMIT_STEPS[2]);
+  let best = 0;
+  let distance = Infinity;
+  WORLD_LIMIT_STEPS.forEach((option, index) => {
+    const nextDistance = Math.abs(option - value);
+    if (nextDistance < distance) {
+      best = index;
+      distance = nextDistance;
+    }
+  });
+  return best;
+}
+function worldLimitValue() {
+  const slider = $("world-limit-slider");
+  const index = Math.max(0, Math.min(WORLD_LIMIT_STEPS.length - 1, Number(slider?.value || closestWorldLimitIndex(state.world.limit))));
+  return WORLD_LIMIT_STEPS[index] || WORLD_LIMIT_STEPS[2];
+}
+function updateWorldLimitReadout() {
+  const readout = $("world-limit-readout");
+  if (readout) readout.textContent = `${formatDownloads(state.world.limit)} chunks`;
+}
+const api = async (path, opts = {}) => {
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    let error = await res.text();
+    try { error = JSON.parse(error).error || error; } catch {}
+    throw new Error(error);
+  }
+  return res.headers.get("content-type")?.includes("application/json") ? res.json() : res.text();
+};
+const post = (path, body = {}) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+const del = path => api(path, { method: "DELETE" });
+
+function notice(message, error = false) {
+  const box = $("notice");
+  box.textContent = message;
+  box.className = "notice" + (error ? " error" : "");
+  clearTimeout(notice.timer);
+  notice.timer = setTimeout(() => box.classList.add("hidden"), 3800);
+}
+
+function goPage(page, shouldRefresh = false) {
+  if (!pages.some(([id]) => id === page)) return;
+  state.page = page;
+  state.renderedPage = "";
+  const params = new URLSearchParams(location.search);
+  if (page === "dashboard") params.delete("page"); else params.set("page", page);
+  const next = params.toString();
+  history.replaceState(null, "", location.pathname + (next ? "?" + next : ""));
+  render();
+  if (shouldRefresh) refresh(true);
+}
+
+function resetServerScopedState(options = {}) {
+  state.updates = null;
+  state.mods = null;
+  state.files = [];
+  state.world.data = null;
+  state.world.bitmap = null;
+  state.world.centered = false;
+  state.world.trimAreas = [];
+  state.world.trimDraft = null;
+  state.world.trimAnchor = null;
+  state.world.drawingTrim = false;
+  if (!options.keepFiles) {
+    state.filePath = "";
+    state.fileEditor = null;
+  }
+}
+
+function selectServer(id, options = {}) {
+  if (!id || state.selectedServerId === id) return;
+  state.selectedServerId = id;
+  resetServerScopedState(options);
+}
+
+function emptyState(title, body, actions = "") {
+  return `<div class="empty-state"><h3>${esc(title)}</h3><p class="muted">${esc(body)}</p>${actions ? `<div class="empty-actions">${actions}</div>` : ""}</div>`;
+}
+
+function runtimeLabel(loader) {
+  loader = (loader || "-").toLowerCase();
+  if (loader === "neoforge") return "NF";
+  if (loader === "vanilla") return "V";
+  return loader.slice(0, 1).toUpperCase();
+}
+
+function statusLabel(server = {}) {
+  if (server.stopping) return ["Stopping", "red"];
+  if (server.starting || (server.running && !server.ready)) return ["Starting", "green"];
+  if (server.running && server.ready) return ["Running", "green"];
+  if (server.installed) return ["Ready", ""];
+  return ["Needs setup", "red"];
+}
+
+function renderNav() {
+  $("nav").innerHTML = pages.map(([id, label]) => `<button class="nav ${state.page === id ? "active" : ""}" data-page="${id}">${label}</button>`).join("");
+  document.querySelectorAll(".nav").forEach(button => button.onclick = () => goPage(button.dataset.page, true));
+}
+
+function renderHeaderServerSwitcher() {
+  const select = $("server-switcher");
+  if (!select) return;
+  if (!state.servers.length) {
+    select.classList.add("hidden");
+    return;
+  }
+  if (!state.selectedServerId || !state.servers.some(server => server.id === state.selectedServerId)) {
+    selectServer(state.servers.find(server => server.active)?.id || state.servers[0].id);
+  }
+  select.classList.remove("hidden");
+  const html = state.servers.map(server => {
+    const label = `${server.active ? "Active: " : ""}${server.name || server.id}`;
+    return `<option value="${esc(server.id)}" ${server.id === state.selectedServerId ? "selected" : ""}>${esc(label)}</option>`;
+  }).join("");
+  if (select.innerHTML !== html) select.innerHTML = html;
+  if (select.value !== state.selectedServerId) select.value = state.selectedServerId;
+  select.onchange = () => {
+    selectServer(select.value);
+    render();
+    refresh(true);
+  };
+}
+
+async function refresh(forceRender = false) {
+  try {
+    const previousInstalled = state.status?.server?.installed ?? null;
+    const previousRunning = state.status?.server?.running ?? null;
+    state.status = await api("/api/status");
+    sampleHistory();
+    $("controller-pill").innerHTML = `<span class="dot"></span>Online`;
+    $("controller-pill").className = "pill green";
+    if (["servers", "dashboard", "settings", "setup", "mods", "updates", "files", "world", "termux"].includes(state.page)) {
+      const data = await api("/api/servers");
+      state.servers = data.servers || [];
+      if (!state.selectedServerId && data.activeServerId) state.selectedServerId = data.activeServerId;
+    }
+    renderHeaderServerSwitcher();
+    if (state.page === "servers" || state.page === "backups") state.backups = (await api("/api/backups")).backups || [];
+    if (state.page === "mods") {
+      try { state.mods = await api("/api/mods?" + q({ serverId: selectedServerIdForApi() })); } catch { state.mods = { installed: [] }; }
+      try { state.modProviders = await api("/api/mods/providers"); } catch { state.modProviders = null; }
+    }
+    if (state.page === "updates") await loadUpdatePlan(false);
+    if (state.page === "servers" && state.selectedServerId) {
+      try { state.modsByServer[state.selectedServerId] = await api("/api/mods?" + q({ serverId: state.selectedServerId })); } catch { state.modsByServer[state.selectedServerId] = { installed: [] }; }
+    }
+    if (state.page === "files") await loadFiles(false);
+    const installed = state.status?.server?.installed ?? false;
+    const running = state.status?.server?.running ?? false;
+    if (forceRender || state.renderedPage !== state.page || previousInstalled !== installed || previousRunning !== running) {
+      render();
+    } else {
+      updateLivePage();
+    }
+  } catch (error) {
+    $("controller-pill").innerHTML = `<span class="dot"></span>Offline`;
+    $("controller-pill").className = "pill red";
+    notice(error.message, true);
+  }
+}
+
+function render() {
+  renderNav();
+  renderHeaderServerSwitcher();
+  state.renderedPage = state.page;
+  $("title").textContent = pages.find(([id]) => id === state.page)?.[1] || "MineMux";
+  $("subtitle").textContent = subtitle();
+  if (state.page === "dashboard") renderDashboard();
+  if (state.page === "servers") renderServers();
+  if (state.page === "setup") renderSetup();
+  if (state.page === "backups") renderBackups();
+  if (state.page === "mods") renderMods();
+  if (state.page === "updates") renderUpdates();
+  if (state.page === "world") renderWorld();
+  if (state.page === "files") renderFiles();
+  if (state.page === "settings") renderSettings();
+  if (state.page === "termux") renderTermux();
+  if (state.page === "console") renderConsole();
+}
+
+function updateLivePage() {
+  if (state.page === "dashboard") updateDashboard();
+  if (state.page === "servers") updateServerSummary();
+  if (state.page === "backups") updateBackupsListOnly();
+  if (state.page === "console") loadLogs("console");
+  if (state.page === "files") updateFilesListOnly();
+  if (state.page === "world") drawWorldMap();
+}
+
+function updateServerSummary() {
+  const server = selectedServer();
+  if (!server) return;
+  state.servers.forEach(item => {
+    const status = $("server-row-status-" + domId(item.id));
+    if (status) status.outerHTML = serverStatusPill(item, "server-row-status-" + domId(item.id));
+    setText("server-row-last-" + domId(item.id), item.lastRunAt ? new Date(item.lastRunAt).toLocaleString() : "Never");
+  });
+  const title = $("server-detail-title");
+  if (title) title.textContent = server.name || "MineMux Server";
+  const heroStatus = $("server-detail-hero-status");
+  if (heroStatus) heroStatus.outerHTML = serverStatusPill(server, "server-detail-hero-status");
+  const address = $("server-detail-addresses");
+  if (address) address.innerHTML = serverAddressBlock(server);
+  const overview = $("server-detail-overview");
+  if (overview) overview.innerHTML = serverOverviewGrid(server);
+  const actions = $("server-actions-body");
+  if (actions) {
+    const next = serverActionsBody(server);
+    if (actions.innerHTML !== next) {
+      actions.innerHTML = next;
+      wireServerActionButtons();
+    }
+  }
+  const seed = $("server-seed-panel");
+  if (seed) seed.innerHTML = serverSeedPanel(server);
+  const backupStats = $("server-backup-stats");
+  if (backupStats) backupStats.innerHTML = backupStatsHtml(backupsForServer(server));
+  const backupList = $("server-backup-list");
+  if (backupList) {
+    const next = serverBackupRowsHtml(server);
+    if (backupList.innerHTML !== next) {
+      backupList.innerHTML = next;
+      wireBackupButtons();
+    }
+  }
+  const modSummary = $("server-mod-summary");
+  if (modSummary) modSummary.innerHTML = serverModsSummary(server);
+  const modList = $("server-mod-list");
+  if (modList) {
+    const next = serverModsListHtml(server);
+    if (modList.innerHTML !== next) {
+      modList.innerHTML = next;
+      wireModButtons();
+    }
+  }
+  wireCopyButtons();
+}
+
+function subtitle() {
+  if (state.page === "servers") return "Configured servers and active profile management.";
+  if (state.page === "setup") return "Create a new Minecraft server profile.";
+  if (state.page === "backups") return "Create, upload, restore, and download backups.";
+  if (state.page === "mods") return "Install Modrinth projects and uploaded JARs.";
+  if (state.page === "updates") return "Refresh Minecraft, runtime builds, and managed add-ons.";
+  if (state.page === "world") return "Top-down generated world view by dimension.";
+  if (state.page === "files") return "Browse, download, upload, edit, and delete server files.";
+  if (state.page === "settings") return "Boot, defaults, and advanced app controls.";
+  if (state.page === "termux") return "Run commands in the Termux environment.";
+  if (state.page === "console") return "Live server output and command sending.";
+  return "Current server, live metrics, quick actions, and setup.";
+}
+
+function renderDashboard() {
+  const status = state.status || {};
+  const server = status.server || {};
+  const profile = status.profile || {};
+  if (!server.installed) {
+    $("content").innerHTML = setupCard();
+    wireSetup();
+    return;
+  }
+  const [label, color] = statusLabel(server);
+  $("content").innerHTML = `
+    <div class="grid">
+      <div class="card">
+        <div class="between">
+          <div class="row grow">
+            <div class="runtime">${runtimeLabel(profile.loader)}</div>
+            <div class="grow">
+              <h2 id="dash-name">${esc(profile.name || "MineMux Server")}</h2>
+              <div class="muted">IP: <span id="dash-ip">${esc(server.joinAddress || "-")}</span></div>
+              <div id="dash-playit-line">${playitLine(server.playit)}</div>
+              <div class="muted" id="dash-version">Minecraft ${esc(profile.minecraftVersion || "-")} ${esc(profile.loader || "-")}</div>
+            </div>
+          </div>
+          <span class="pill ${color}" id="dash-status"><span class="dot"></span>${label}</span>
+        </div>
+        <div class="actions">
+          ${server.running ? `<button class="danger" data-act="stop">Stop</button>` : `<button class="primary" data-act="start">Start</button>`}
+          <button data-act="restart">Restart</button>
+          <button data-act="backup">Backup</button>
+          <button data-act="details">Details</button>
+          <button data-act="updates">Updates</button>
+          <button data-act="mods">Add-ons</button>
+          <button data-act="world">World</button>
+          <button data-act="files">Files</button>
+        </div>
+      </div>
+      <div id="dash-playit-card">${playitCard(server.playit)}</div>
+      <div class="metrics">
+        ${metric("TPS", server.tps ? server.tps.toFixed(1) + " / 20" : "-", "green", "dash-tps", "tps", 20)}
+        ${metric("Players", `${server.players || 0} / ${profile.maxPlayers || 0}`, "green", "dash-players", "players", Math.max(profile.maxPlayers || 1, 1))}
+        ${metric("CPU", pct(status.system?.cpu?.percent), "", "dash-cpu", "cpu", 100)}
+        ${metric("Memory", pct(status.system?.memory?.percent), "", "dash-memory", "memory", 100)}
+        ${metric("Uptime", uptime(server.uptimeSec), "", "dash-uptime")}
+        ${metric("Disk", bytes(server.storageBytes), "", "dash-disk", "disk", 100)}
+      </div>
+      <div class="cols">
+        <div class="grid">
+          ${activityCard()}
+          ${consoleCard()}
+        </div>
+        ${mapCard(profile)}
+      </div>
+    </div>`;
+  wireDashboardActions();
+}
+
+function metric(label, value, color = "", id = "", historyKey = "", max = 100) {
+  const graph = historyKey ? `<div class="spark" data-history="${historyKey}" data-max="${max}">${sparkline(state.history[historyKey] || [], max)}</div>` : `<div class="spark empty"></div>`;
+  return `<div class="card metric"><h3>${label}</h3><div class="value"${id ? ` id="${id}"` : ""}>${esc(value)}</div>${graph}</div>`;
+}
+
+function sampleHistory() {
+  const server = state.status?.server || {};
+  const profile = state.status?.profile || {};
+  pushHistory("tps", Number(server.tps || 0));
+  pushHistory("players", Number(server.players || 0));
+  pushHistory("cpu", Number(state.status?.system?.cpu?.percent || 0));
+  pushHistory("memory", Number(state.status?.system?.memory?.percent || 0));
+  const diskLimit = Math.max(Number(server.storageBytes || 0), Number(profile.memoryMb || 1) * 1024 * 1024);
+  pushHistory("disk", diskLimit ? Number(server.storageBytes || 0) / diskLimit * 100 : 0);
+}
+
+function pushHistory(key, value) {
+  if (!Number.isFinite(value)) value = 0;
+  state.history[key].push(value);
+  if (state.history[key].length > 80) state.history[key].shift();
+}
+
+function sparkline(values, max = 100) {
+  if (!values || values.length === 0) {
+    values = [0];
+  }
+  const width = 160;
+  const height = 34;
+  const safeMax = Math.max(1, max, ...values);
+  const points = values.map((value, index) => {
+    const x = values.length <= 1 ? 0 : index * width / (values.length - 1);
+    const y = height - Math.max(0, Math.min(value, safeMax)) / safeMax * height;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const area = `0,${height} ${points} ${width},${height}`;
+  return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"><polygon points="${area}"></polygon><polyline points="${points}"></polyline></svg>`;
+}
+
+function updateSparkline(key, max = 100) {
+  document.querySelectorAll(`[data-history="${key}"]`).forEach(node => {
+    node.innerHTML = sparkline(state.history[key] || [], max);
+  });
+}
+
+function uptime(seconds) {
+  seconds = Number(seconds || 0);
+  if (!seconds) return "-";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+function playitVisible(playit = {}) {
+  return Boolean(playit.enabled || playit.running || playit.claimUrl || playit.address || playit.error);
+}
+
+function playitLine(playit = {}) {
+  if (!playitVisible(playit)) return "";
+  if (playit.address) return `<div class="muted">PlayIt: <span style="color:var(--green);font-weight:800">${esc(playit.address)}</span></div>`;
+  if (playit.error) return `<div class="muted">PlayIt: <span style="color:var(--red);font-weight:800">${esc(playit.error)}</span></div>`;
+  if (playit.claimUrl) return `<div class="muted">PlayIt claim: <a class="map-link" href="${esc(playit.claimUrl)}" target="_blank">${esc(playit.claimUrl)}</a></div>`;
+  return `<div class="muted">PlayIt: <span style="color:var(--green);font-weight:800">enabled</span></div>`;
+}
+
+function playitCard(playit = {}) {
+  if (!playitVisible(playit)) return "";
+  if (playit.address) {
+    return `<div class="card"><div class="between"><div><h2>PlayIt.gg</h2><p class="muted">${esc(playit.mode || "Tunnel")} address</p></div><button data-copy="${esc(playit.address)}">Copy</button></div><div class="item"><b>${esc(playit.address)}</b></div></div>`;
+  }
+  if (playit.error) {
+    const claim = playit.claimUrl ? `<a href="${esc(playit.claimUrl)}" target="_blank"><button>Open Claim</button></a>` : "";
+    const fallback = playit.running ? `<button data-act="playit-agent-stop">Stop Agent</button>` : `<button data-act="playit-agent-start">Start Agent</button>`;
+    return `<div class="card"><div class="between"><div><h2>PlayIt.gg</h2><p class="muted">${esc(playit.mode || "Standalone agent")}</p></div><div class="row">${claim}${fallback}</div></div><div class="item"><b style="color:var(--red)">${esc(playit.error)}</b></div></div>`;
+  }
+  if (playit.claimUrl) {
+    return `<div class="card"><div class="between"><div><h2>PlayIt.gg Setup</h2><p class="muted">${esc(playit.mode || "Tunnel")} claim</p></div><a href="${esc(playit.claimUrl)}" target="_blank"><button class="primary">Open Claim</button></a></div><div class="item"><b>${esc(playit.claimUrl)}</b></div></div>`;
+  }
+  const control = playit.running ? `<button data-act="playit-agent-stop">Stop Agent</button>` : `<button data-act="playit-agent-start">Start Agent</button>`;
+  return `<div class="card"><div class="between"><div><h2>PlayIt.gg</h2><p class="muted">${esc(playit.mode || "Standalone agent")}</p></div>${control}</div><div class="item"><b>${playit.running ? "Agent running" : "Waiting to start"}</b></div></div>`;
+}
+
+function updateDashboard() {
+  const status = state.status || {};
+  const server = status.server || {};
+  const profile = status.profile || {};
+  if (!server.installed) return;
+  const [label, color] = statusLabel(server);
+  setText("dash-name", profile.name || "MineMux Server");
+  setText("dash-ip", server.joinAddress || "-");
+  const statusNode = $("dash-status");
+  if (statusNode) {
+    statusNode.className = "pill " + color;
+    statusNode.innerHTML = `<span class="dot"></span>${esc(label)}`;
+  }
+  const playitLineNode = $("dash-playit-line");
+  if (playitLineNode) playitLineNode.innerHTML = playitLine(server.playit);
+  const playitCardNode = $("dash-playit-card");
+  if (playitCardNode) playitCardNode.innerHTML = playitCard(server.playit);
+  setText("dash-version", `Minecraft ${profile.minecraftVersion || "-"} ${profile.loader || "-"}`);
+  setText("dash-tps", server.tps ? server.tps.toFixed(1) + " / 20" : "-");
+  setText("dash-players", `${server.players || 0} / ${profile.maxPlayers || 0}`);
+  setText("dash-cpu", pct(status.system?.cpu?.percent));
+  setText("dash-memory", pct(status.system?.memory?.percent));
+  setText("dash-uptime", uptime(server.uptimeSec));
+  setText("dash-disk", bytes(server.storageBytes));
+  updateSparkline("tps", 20);
+  updateSparkline("players", Math.max(profile.maxPlayers || 1, 1));
+  updateSparkline("cpu", 100);
+  updateSparkline("memory", 100);
+  updateSparkline("disk", 100);
+  updateMapCard();
+  updateRecentActivity();
+  wireDashboardActions();
+}
+
+function currentWorldSeed() {
+  const status = state.status || {};
+  const server = status.server || {};
+  const profile = status.profile || {};
+  return server.worldSeed || profile.seed || profile.properties?.["level-seed"] || "";
+}
+
+function setText(id, value) {
+  const node = $(id);
+  if (node && node.textContent !== String(value)) node.textContent = value;
+}
+
+function activityCard() {
+  const lines = state.status?.server?.logs || [];
+  return `<div class="card"><div class="between"><h2>Recent Activity</h2><span class="muted">Latest 3</span></div><div class="list" id="recent-activity-list">${recentEvents().map(item => `<div class="item">${esc(item)}</div>`).join("") || `<div class="muted">No activity yet.</div>`}</div></div>`;
+}
+
+function updateRecentActivity() {
+  const target = $("recent-activity-list");
+  if (!target) return;
+  target.innerHTML = recentEvents().map(item => `<div class="item">${esc(item)}</div>`).join("") || `<div class="muted">No activity yet.</div>`;
+}
+
+function recentEvents() {
+  const lines = state.logs || [];
+  return lines.filter(line => /joined|left|backup|started|stopped|done/i.test(line)).slice(-3).reverse();
+}
+
+function consoleCard() {
+  return `<div class="card"><div class="between"><h2>Console</h2><button data-act="console-page">Open</button></div><div class="console" id="dash-console">Loading logs...</div><div class="row" style="margin-top:10px"><input id="dash-command" class="grow" placeholder="say Hello from Web UI"><button data-act="send-dashboard">Send</button></div></div>`;
+}
+
+function mapCard(profile) {
+  const seed = currentWorldSeed();
+  const url = seed ? chunkbaseUrl(seed) : "";
+  return `<div class="card" id="map-card"><h2>World Map</h2><p class="muted">Run <b>/seed</b> from the console if the seed is unknown. MineMux reads the server output and updates this card.</p><div class="item"><b>Seed</b><br><span id="world-seed">${esc(seed || "Random / unknown")}</span></div><div id="chunkbase-link">${chunkbaseHtml(seed)}</div></div>`;
+}
+
+function chunkbaseUrl(seed) {
+  return `https://www.chunkbase.com/apps/seed-map#seed=${encodeURIComponent(seed)}&platform=java`;
+}
+
+function chunkbaseHtml(seed) {
+  if (!seed) return `<p class="muted">No seed detected yet.</p>`;
+  const url = chunkbaseUrl(seed);
+  return `<p><a href="${url}" target="_blank" style="color:var(--green)">Open seed map</a></p><iframe title="Chunkbase seed map" src="${url}"></iframe>`;
+}
+
+function updateMapCard() {
+  const seed = currentWorldSeed();
+  setText("world-seed", seed || "Random / unknown");
+  const target = $("chunkbase-link");
+  if (target) target.innerHTML = chunkbaseHtml(seed);
+}
+
+function wireDashboardActions() {
+  document.querySelectorAll("[data-act]").forEach(button => {
+    button.onclick = async () => {
+      const act = button.dataset.act;
+      try {
+        if (act === "start") await run(button, () => post("/api/server/start"));
+        if (act === "stop" && confirm("Stop server?")) await run(button, () => post("/api/server/stop"));
+        if (act === "restart" && confirm("Restart server?")) await run(button, () => post("/api/server/restart"));
+        if (act === "backup") await run(button, () => post("/api/backups/create"));
+        if (act === "details") { goPage("servers"); return; }
+        if (act === "console-page") { goPage("console"); return; }
+        if (act === "updates") { goPage("updates", true); return; }
+        if (act === "mods") { goPage("mods", true); return; }
+        if (act === "world") { goPage("world", true); return; }
+        if (act === "files") { state.filePath = ""; goPage("files", true); return; }
+        if (act === "send-dashboard") await sendCommandFromInput("dash-command");
+        if (act === "playit-agent-start") await run(button, () => post("/api/playit/agent/start"));
+        if (act === "playit-agent-stop") await run(button, () => post("/api/playit/agent/stop"));
+        await refresh();
+      } catch (error) { notice(error.message, true); }
+    };
+  });
+  wireCopyButtons();
+  wireCommandInput("dash-command");
+  loadLogs("dash-console");
+}
+
+function wireCopyButtons() {
+  document.querySelectorAll("[data-copy]").forEach(button => {
+    button.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy || "");
+        notice("Copied");
+      } catch {
+        notice("Copy failed", true);
+      }
+    };
+  });
+}
+
+async function run(button, fn) {
+  button.disabled = true;
+  try { const result = await fn(); notice("Done"); return result; }
+  finally { setTimeout(() => button.disabled = false, 1200); }
+}
+
+function renderSetup() {
+  $("content").innerHTML = setupCard();
+  wireSetup();
+}
+
+function defaultSetupServerId() {
+  if (!state.servers.length) return "main";
+  const taken = new Set(state.servers.map(server => server.id));
+  let index = state.servers.length + 1;
+  while (taken.has("server-" + index)) index++;
+  return "server-" + index;
+}
+
+function defaultSetupServerName() {
+  return state.servers.length ? "Server " + (state.servers.length + 1) : "Main Server";
+}
+
+function setupCard() {
+  const suggestedId = defaultSetupServerId();
+  const suggestedName = defaultSetupServerName();
+  return `<div class="setup-grid">
+    <div class="grid">
+      <div class="card setup-section">
+        <div class="section-head">
+          <div><h2>Server Basics</h2><p class="muted">Name, runtime, and Minecraft version.</p></div>
+          <span class="pill blue"><span class="dot"></span>New profile</span>
+        </div>
+        <div class="form">
+          <label>Name<input id="setup-name" value="${esc(suggestedName)}"></label>
+          <label>Server ID<input id="setup-id" value="${esc(suggestedId)}"></label>
+          <label>Runtime<select id="setup-loader"><option value="paper">Paper</option><option value="vanilla">Vanilla</option><option value="fabric">Fabric</option><option value="quilt">Quilt</option><option value="forge">Forge</option><option value="neoforge">NeoForge</option></select></label>
+          <label>Version<select id="setup-version"><option>latest-compatible</option></select></label>
+          <label>Seed<input id="setup-seed" placeholder="optional, ignored when uploading a world"></label>
+          <div class="drop-zone">
+            <b>Existing World</b>
+            <div class="muted" id="setup-world-label">${esc(setupWorldLabel())}</div>
+            <div class="row"><button id="setup-world-upload-btn" type="button" ${state.setupWorldUploading ? "disabled" : ""}>${state.setupWorldUploading ? "Uploading..." : "Upload World ZIP"}</button><button id="setup-world-clear" type="button" ${state.setupWorldUpload && !state.setupWorldUploading ? "" : "disabled"}>Clear</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="card setup-section">
+        <div class="section-head">
+          <div><h2>Resources</h2><p class="muted">Good defaults for phones are already selected.</p></div>
+          <div class="row">
+            <button data-memory="1536">Light</button>
+            <button data-memory="2048">Balanced</button>
+            <button data-memory="3072">Large</button>
+          </div>
+        </div>
+        <div class="form">
+          <label class="slider-field">
+            <span class="slider-top"><span>Memory</span><b id="setup-memory-readout">${formatRam(RAM_STEPS[closestRamIndex(2048)])} (${RAM_STEPS[closestRamIndex(2048)]} MB)</b></span>
+            <input id="setup-memory" type="range" min="0" max="${RAM_STEPS.length - 1}" step="1" value="${closestRamIndex(2048)}">
+            <span class="range-ticks"><span>${formatRam(RAM_STEPS[0])}</span><span>${formatRam(RAM_STEPS[2])}</span><span>${formatRam(RAM_STEPS[5])}</span><span>${formatRam(RAM_STEPS[RAM_STEPS.length - 1])}</span></span>
+          </label>
+          <label>Max Players<input id="setup-players" type="number" min="1" value="8"></label>
+          <label>View Distance<input id="setup-view" type="number" min="2" max="32" value="6"></label>
+          <label>Simulation Distance<input id="setup-sim" type="number" min="2" max="32" value="4"></label>
+        </div>
+      </div>
+      <div class="card setup-section">
+        <div class="section-head">
+          <div><h2>Add-ons</h2><p class="muted">Optional networking and crossplay.</p></div>
+        </div>
+        <div class="choice-grid">
+          <label class="toggle-row"><input id="setup-crossplay" type="checkbox"><div>Bedrock crossplay<span>Install Geyser for Bedrock clients.</span></div></label>
+          <label class="toggle-row"><input id="setup-floodgate" type="checkbox"><div>Floodgate<span>Let Bedrock players join where supported.</span></div></label>
+          <label class="toggle-row"><input id="setup-playit" type="checkbox"><div>PlayIt.gg tunnel<span>Paper uses the plugin; other runtimes use the standalone agent.</span></div></label>
+        </div>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h2>Review</h2>
+        <div class="list" id="setup-review"></div>
+        <label class="toggle-row" style="margin-top:12px"><input id="setup-eula" type="checkbox"><div>Minecraft EULA accepted<span>Required before the server can start.</span></div></label>
+        <div class="quick-actions" style="margin-top:12px">
+          <button id="setup-cancel">Cancel</button>
+          <button class="primary" id="setup-create" ${state.setupWorldUploading ? "disabled" : ""}>Create Server</button>
+        </div>
+        ${setupProgressHtml()}
+      </div>
+      <div class="card">
+        <h2>Installed Servers</h2>
+        <div class="list">${state.servers.slice(0, 5).map(server => `<div class="item compact-item between"><div><b>${esc(server.name)}</b><div class="muted">${esc(server.id)}</div></div>${serverStatusPill(server)}</div>`).join("") || `<p class="muted">No servers yet.</p>`}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function setupWorldLabel() {
+  if (state.setupWorldUploading) return "Uploading world...";
+  return state.setupWorldUpload ? (state.setupWorldUpload.fileName || "World uploaded") : "No world uploaded";
+}
+
+function syncSetupWorldUploadControls() {
+  setText("setup-world-label", setupWorldLabel());
+  const upload = $("setup-world-upload-btn");
+  if (upload) {
+    upload.disabled = state.setupWorldUploading;
+    upload.textContent = state.setupWorldUploading ? "Uploading..." : "Upload World ZIP";
+  }
+  const clear = $("setup-world-clear");
+  if (clear) clear.disabled = state.setupWorldUploading || !state.setupWorldUpload;
+  const create = $("setup-create");
+  if (create) create.disabled = state.setupWorldUploading;
+}
+
+function setupProgressHtml() {
+  const progress = state.setupProgress;
+  return `<div id="setup-progress-card" class="progress-shell ${progress ? "" : "hidden"}" style="margin-top:12px">
+    <div class="between"><div><b id="setup-progress-title">${progress ? "Creating server" : "Ready"}</b><div class="muted" id="setup-progress-detail">Preparing...</div></div><span class="pill green"><span class="dot"></span><span id="setup-progress-eta">Starting</span></span></div>
+    <div class="progress-track"><div class="progress-fill" id="setup-progress-fill"></div></div>
+    <div class="console" id="setup-console" style="height:220px">Waiting for setup output...</div>
+  </div>`;
+}
+
+async function wireSetup() {
+  let versionRequest = 0;
+
+  const updateReview = () => {
+    updateSetupMemoryReadout();
+    const loader = $("setup-loader").value;
+    const playit = $("setup-playit").checked ? (loader === "paper" ? "Plugin + agent option" : "Standalone agent") : "Off";
+    const world = state.setupWorldUploading ? "Uploading world..." : (state.setupWorldUpload ? `Upload: ${state.setupWorldUpload.fileName}` : ($("setup-seed").value ? `Seed: ${$("setup-seed").value}` : "Random seed"));
+    $("setup-review").innerHTML = [
+      ["Server", `${$("setup-name").value || "Unnamed"} (${setupServerIdValue()})`],
+      ["Runtime", `${loader} / ${$("setup-version").value}`],
+      ["Resources", `${setupMemoryValue()} MB, ${$("setup-players").value} players`],
+      ["Distances", `${$("setup-view").value} view, ${$("setup-sim").value} simulation`],
+      ["World", world],
+      ["Crossplay", $("setup-crossplay").checked ? ($("setup-floodgate").checked ? "Geyser + Floodgate" : "Geyser") : "Off"],
+      ["PlayIt.gg", playit]
+    ].map(([label, value]) => `<div class="item compact-item between"><span class="muted">${label}</span><b>${esc(value)}</b></div>`).join("");
+  };
+
+  const syncWorldUploadState = () => {
+    syncSetupWorldUploadControls();
+    updateReview();
+  };
+
+  const setLoaderOptions = loaders => {
+    const select = $("setup-loader");
+    const selected = select.value || "paper";
+    if (!Array.isArray(loaders) || !loaders.length) return;
+    select.innerHTML = loaders.map(loader => `<option value="${esc(loader.id)}">${esc(loader.name || loader.id)}${loader.supported ? "" : " (coming soon)"}</option>`).join("");
+    select.value = Array.from(select.options).some(option => option.value === selected) ? selected : "paper";
+  };
+
+  const loadSetupVersions = async (loader, preferredVersion = $("setup-version").value || "latest-compatible") => {
+    const requestId = ++versionRequest;
+    const version = $("setup-version");
+    version.disabled = true;
+    try {
+      const data = await api("/api/server/options?" + q({ loader }));
+      if (requestId !== versionRequest) return;
+      state.options = data;
+      setLoaderOptions(data.loaders);
+      const versions = data.minecraftVersions || data.versions || [];
+      const choices = ["latest-compatible"];
+      versions.forEach(item => {
+        const id = item.id || item.version || "";
+        if (id && !choices.includes(id)) choices.push(id);
+      });
+      version.innerHTML = choices.map(choice => `<option value="${esc(choice)}">${esc(choice)}</option>`).join("");
+      version.value = choices.includes(preferredVersion) ? preferredVersion : "latest-compatible";
+      if (data.warning) console.warn("MineMux version catalog fallback:", data.warning);
+    } catch (error) {
+      notice("Could not refresh versions: " + error.message, true);
+    } finally {
+      if (requestId === versionRequest) {
+        version.disabled = false;
+        updateReview();
+      }
+    }
+  };
+
+  document.querySelectorAll("[data-memory]").forEach(button => button.onclick = () => {
+    $("setup-memory").value = closestRamIndex(button.dataset.memory);
+    updateReview();
+  });
+  $("setup-world-upload-btn").onclick = () => $("setup-world-upload").click();
+  $("setup-world-clear").onclick = () => {
+    if (state.setupWorldUploading) return;
+    state.setupWorldUpload = null;
+    syncWorldUploadState();
+  };
+  ["setup-name", "setup-id", "setup-version", "setup-loader", "setup-seed", "setup-memory", "setup-players", "setup-view", "setup-sim", "setup-crossplay", "setup-floodgate", "setup-playit"].forEach(id => {
+    const node = $(id);
+    if (node) node.addEventListener("input", updateReview);
+    if (node) node.addEventListener("change", updateReview);
+  });
+  $("setup-loader").addEventListener("change", () => loadSetupVersions($("setup-loader").value, "latest-compatible"));
+  await loadSetupVersions($("setup-loader").value, "latest-compatible");
+  $("setup-cancel").onclick = () => goPage(state.servers.length ? "servers" : "dashboard");
+  $("setup-create").onclick = async () => {
+    if (state.setupWorldUploading) return notice("Wait for the world upload to finish first.", true);
+    const loaderValue = $("setup-loader").value;
+    const body = {
+      serverId: setupServerIdValue(),
+      name: $("setup-name").value.trim() || "MineMux Server",
+      minecraftVersion: $("setup-version").value,
+      loader: loaderValue,
+      seed: $("setup-seed").value.trim(),
+      worldUploadId: state.setupWorldUpload?.worldUploadId || "",
+      memoryMb: setupMemoryValue(),
+      maxPlayers: Number($("setup-players").value),
+      viewDistance: Number($("setup-view").value),
+      simulationDistance: Number($("setup-sim").value),
+      pendingModrinthProjects: [],
+      crossplay: { enabled: $("setup-crossplay").checked, installGeyser: $("setup-crossplay").checked, installFloodgate: $("setup-floodgate").checked, floodgate: $("setup-floodgate").checked, bedrockUdp: 19132 },
+      playit: { enabled: $("setup-playit").checked },
+      acceptEula: $("setup-eula").checked
+    };
+    if (!body.acceptEula) return notice("Accept the Minecraft EULA first.", true);
+    try {
+      startSetupProgress(loaderValue);
+      await run($("setup-create"), () => post("/api/server/setup", body));
+      finishSetupProgress(true);
+      selectServer(body.serverId);
+      state.updates = null;
+      goPage("servers");
+      await refresh(true);
+    } catch (error) {
+      finishSetupProgress(false);
+      notice(error.message, true);
+    }
+  };
+  updateReview();
+}
+
+function startSetupProgress(loader) {
+  clearInterval(state.setupProgressTimer);
+  state.setupProgress = { startedAt: Date.now(), estimateSec: setupEstimateSeconds(loader) };
+  const card = $("setup-progress-card");
+  if (card) card.classList.remove("hidden");
+  updateSetupProgress();
+  state.setupProgressTimer = setInterval(updateSetupProgress, 1000);
+}
+
+function finishSetupProgress(success) {
+  clearInterval(state.setupProgressTimer);
+  state.setupProgressTimer = null;
+  state.setupProgress = null;
+  const title = $("setup-progress-title");
+  if (title) title.textContent = success ? "Setup complete" : "Setup failed";
+  const eta = $("setup-progress-eta");
+  if (eta) eta.textContent = success ? "Done" : "Stopped";
+  const fill = $("setup-progress-fill");
+  if (fill) fill.style.width = success ? "100%" : "100%";
+  loadLogs("setup-console");
+}
+
+function setupEstimateSeconds(loader) {
+  loader = String(loader || "").toLowerCase();
+  if (loader === "forge" || loader === "neoforge") return 420;
+  if (loader === "fabric" || loader === "quilt") return 240;
+  if (loader === "vanilla") return 120;
+  return 180;
+}
+
+async function updateSetupProgress() {
+  if (!state.setupProgress) return;
+  const elapsed = Math.max(0, Math.floor((Date.now() - state.setupProgress.startedAt) / 1000));
+  const remaining = Math.max(0, state.setupProgress.estimateSec - elapsed);
+  const percent = Math.min(95, Math.max(6, Math.round((elapsed / state.setupProgress.estimateSec) * 100)));
+  setText("setup-progress-title", "Creating server");
+  setText("setup-progress-detail", `Elapsed ${formatDuration(elapsed)}. Installing runtime, writing files, and adding selected add-ons.`);
+  setText("setup-progress-eta", remaining ? `~${formatDuration(remaining)} left` : "Finishing");
+  const fill = $("setup-progress-fill");
+  if (fill) fill.style.width = percent + "%";
+  await loadLogs("setup-console");
+}
+
+function formatDuration(seconds) {
+  seconds = Math.max(0, Number(seconds || 0));
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return mins ? `${mins}m ${secs}s` : `${secs}s`;
+}
+
+function setupServerIdValue() {
+  const raw = $("setup-id").value.trim().toLowerCase();
+  return raw.replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || defaultSetupServerId();
+}
+
+function renderServers() {
+  const active = state.servers.find(server => server.active);
+  if (state.servers.length && (!state.selectedServerId || !state.servers.some(server => server.id === state.selectedServerId))) {
+    selectServer(active?.id || state.servers[0].id);
+  }
+  $("content").innerHTML = `
+    <div class="servers-layout">
+      <div class="card server-list-card">
+        <div class="between">
+          <div>
+            <h2>Servers</h2>
+            <p class="muted">${state.servers.length} configured</p>
+          </div>
+          <button class="primary" id="new-server">New</button>
+        </div>
+        <div class="list">${state.servers.map(serverRow).join("") || emptyState("No servers yet", "Create a server profile to start hosting from this phone.", `<button class="primary" id="empty-new-server">Create Server</button>`)}</div>
+      </div>
+      <div id="server-detail">${serverDetail()}</div>
+    </div>`;
+  $("new-server").onclick = () => goPage("setup");
+  const emptyNew = $("empty-new-server");
+  if (emptyNew) emptyNew.onclick = () => goPage("setup");
+  wireServerDetailButtons();
+}
+
+function serverRow(server) {
+  const profile = server.profile || {};
+  const selected = server.id === state.selectedServerId;
+  return `<div class="item server-row ${server.active ? "active" : ""} ${selected ? "selected" : ""}" data-select-card="${esc(server.id)}">
+    <div class="between">
+      <div class="grow">
+        <div class="server-row-title">${esc(server.name)}</div>
+        <div class="muted">Minecraft ${esc(profile.minecraftVersion || "-")} / ${esc(profile.loader || "-")}</div>
+        <div class="dim">Last run: <span id="server-row-last-${domId(server.id)}">${server.lastRunAt ? new Date(server.lastRunAt).toLocaleString() : "Never"}</span></div>
+      </div>
+      ${serverStatusPill(server, "server-row-status-" + domId(server.id))}
+    </div>
+    <div class="row">
+      <button data-select-server="${esc(server.id)}">Details</button>
+      ${server.active ? `<span class="pill green">Active</span>` : `<button data-make-active="${esc(server.id)}">Make Active</button>`}
+    </div>
+  </div>`;
+}
+
+function serverDetail() {
+  const server = selectedServer();
+  if (!server) return `<div class="card">${emptyState("No server selected", "Create a server or choose one from the list to see controls here.", `<button class="primary" data-open-setup>Create Server</button>`)}</div>`;
+  const profile = server.profile || {};
+  return `<div class="grid">
+    <div class="card">
+      <div class="detail-hero">
+        <div class="runtime">${runtimeLabel(profile.loader)}</div>
+        <div class="grow">
+          <h2 id="server-detail-title">${esc(server.name)}</h2>
+          <div class="muted">Minecraft ${esc(profile.minecraftVersion || "-")} / ${esc(profile.loader || "-")} ${profile.javaVersion ? `/ Java ${profile.javaVersion}` : ""}</div>
+        </div>
+        ${serverStatusPill(server, "server-detail-hero-status")}
+      </div>
+      <div id="server-detail-overview" style="margin-top:14px">${serverOverviewGrid(server)}</div>
+      <div id="server-detail-addresses" style="margin-top:12px">${serverAddressBlock(server)}</div>
+    </div>
+    <div class="server-detail-grid">
+      <div class="grid">
+        ${serverPropertiesCard(server)}
+        ${serverModsCard(server)}
+        ${serverFilesCard(server)}
+      </div>
+      <div class="grid">
+        ${serverActionsCard(server)}
+        ${serverBackupsCard(server)}
+        ${serverAssetsCard(server)}
+        <div id="server-seed-panel">${serverSeedPanel(server)}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function serverAddressBlock(server) {
+  const playit = server.server?.playit || {};
+  const profile = server.profile || {};
+  const lan = server.server?.joinAddress || server.joinAddress || "-";
+  const playitEnabled = profile.playit?.enabled || playit.enabled || playitVisible(playit);
+  const playitValue = playit.address || playit.claimUrl || "";
+  const playitText = playit.address || playit.claimUrl || playit.error || (playitEnabled ? (playit.running ? "Agent running" : "Enabled, agent ready") : "Not enabled for this server");
+  const playitControl = playitEnabled && !playit.address
+    ? (playit.running ? `<button data-server-act="playit-agent-stop">Stop Agent</button>` : `<button data-server-act="playit-agent-start">Start Agent</button>`)
+    : "";
+  const playitRow = playitEnabled ? `<div class="item compact-item between">
+      <div><b>PlayIt.gg</b><div class="muted">${esc(playitText)}</div></div>
+      <div class="row">
+        ${playit.claimUrl ? `<a href="${esc(playit.claimUrl)}" target="_blank"><button>Open Claim</button></a>` : ""}
+        ${playitValue ? `<button data-copy="${esc(playitValue)}">Copy</button>` : ""}
+        ${playitControl}
+      </div>
+    </div>` : "";
+  return `<div class="tight-list">
+    <div class="item compact-item between">
+      <div><b>LAN address</b><div class="muted">${esc(lan)}</div></div>
+      ${lan !== "-" ? `<button data-copy="${esc(lan)}">Copy</button>` : ""}
+    </div>
+    ${playitRow}
+  </div>`;
+}
+
+function selectedServer() {
+  if (!state.servers.length) return null;
+  if (!state.selectedServerId || !state.servers.some(server => server.id === state.selectedServerId)) {
+    selectServer(state.servers.find(server => server.active)?.id || state.servers[0].id);
+  }
+  return state.servers.find(server => server.id === state.selectedServerId) || state.servers[0];
+}
+
+function selectedServerIdForApi() {
+  return selectedServer()?.id || state.selectedServerId || state.status?.profile?.id || "main";
+}
+
+function domId(value) {
+  return String(value || "server").replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+function serverStatusPill(server, id = "") {
+  const [label, color] = statusLabel(server.server || server);
+  return `<span ${id ? `id="${id}"` : ""} class="pill ${color}"><span class="dot"></span>${esc(label)}</span>`;
+}
+
+function serverOverviewGrid(server) {
+  const profile = server.profile || {};
+  const live = server.server || {};
+  const players = server.active ? `${live.players || 0} / ${profile.maxPlayers || 0}` : `- / ${profile.maxPlayers || 0}`;
+  return `<div class="server-kv-grid">
+    <div class="mini-card"><span class="muted">Runtime</span><b>${esc(profile.loader || "-")}</b></div>
+    <div class="mini-card"><span class="muted">Players</span><b>${esc(players)}</b></div>
+    <div class="mini-card"><span class="muted">Uptime</span><b>${esc(server.active ? uptime(live.uptimeSec) : "-")}</b></div>
+    <div class="mini-card"><span class="muted">Storage</span><b>${esc(server.active ? bytes(live.storageBytes) : "Active only")}</b></div>
+  </div>`;
+}
+
+function serverActionsCard(server) {
+  return `<div class="card"><div class="section-head"><div><h2>Controls</h2><p class="muted">Power actions for the selected profile.</p></div></div><div id="server-actions-body">${serverActionsBody(server)}</div></div>`;
+}
+
+function serverActionsBody(server) {
+  const live = server.server || {};
+  const deleteHint = server.active && live.running ? `<p class="hint">Stop this server before deleting it.</p>` : "";
+  const deleteButton = `<button class="danger" data-delete-server="${esc(server.id)}">Delete Server + Backups</button>`;
+  if (!server.active) {
+    return `<div class="inline-note">This profile is not active. Make it active before starting it, editing files, installing add-ons, or changing runtime properties.</div>
+      <div class="detail-actions" style="margin-top:10px">
+        <button class="primary" data-make-active="${esc(server.id)}">Make Active</button>
+        ${deleteButton}
+      </div>`;
+  }
+  return `<div class="detail-actions">
+    ${live.running ? `<button class="danger" data-server-act="stop">Stop</button>` : `<button class="primary" data-server-act="start">Start</button>`}
+    <button data-server-act="restart" ${live.running ? "" : "disabled"}>Restart</button>
+    <button data-server-act="backup">Create Backup</button>
+    <button data-server-act="updates">Updates</button>
+    <button data-server-act="console">Console</button>
+    ${deleteButton}
+  </div>${deleteHint}`;
+}
+
+function serverPropertiesCard(server) {
+  const profile = server.profile || {};
+  const props = profile.properties || {};
+  return `<div class="card">
+    <div class="section-head">
+      <div><h2>Server Properties</h2><p class="muted">Saved to this server profile and server.properties.</p></div>
+      <button class="primary" data-save-properties>Save</button>
+    </div>
+    <div class="property-grid">
+      <label>Memory MB<input id="cfg-memory" type="number" min="512" max="8192" value="${profile.memoryMb || 2048}"></label>
+      <label>Max Players<input id="cfg-players" type="number" min="1" max="50" value="${profile.maxPlayers || 8}"></label>
+      <label>View Distance<input id="cfg-view" type="number" min="2" max="32" value="${profile.viewDistance || 6}"></label>
+      <label>Simulation Distance<input id="cfg-sim" type="number" min="2" max="32" value="${profile.simulationDistance || 4}"></label>
+      <label>MOTD<input id="cfg-motd" value="${esc(props.motd || "MineMux Server")}"></label>
+      <label>Gamemode<select id="cfg-gamemode">${selectOptions(["survival", "creative", "adventure", "spectator"], props.gamemode || "survival")}</select></label>
+      <label>Difficulty<select id="cfg-difficulty">${selectOptions(["peaceful", "easy", "normal", "hard"], props.difficulty || "normal")}</select></label>
+      <label>PVP<select id="cfg-pvp">${boolOptions(propBool(props, "pvp", true))}</select></label>
+      <label>Online Mode<select id="cfg-online">${boolOptions(propBool(props, "online-mode", true))}</select></label>
+      <label>Command Blocks<select id="cfg-command-blocks">${boolOptions(propBool(props, "enable-command-block", false))}</select></label>
+      <label>Whitelist<select id="cfg-whitelist">${boolOptions(propBool(props, "white-list", false))}</select></label>
+    </div>
+    <p class="hint" style="margin-bottom:0">Most property changes need a restart before Minecraft applies them.</p>
+  </div>`;
+}
+
+function selectOptions(values, selected) {
+  return values.map(value => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(value)}</option>`).join("");
+}
+
+function boolOptions(selected) {
+  return `<option value="true" ${selected ? "selected" : ""}>Enabled</option><option value="false" ${!selected ? "selected" : ""}>Disabled</option>`;
+}
+
+function propBool(props, key, fallback) {
+  if (props[key] === undefined) return fallback;
+  return String(props[key]).toLowerCase() === "true";
+}
+
+function serverBackupsCard(server) {
+  return `<div class="card">
+    <div class="section-head">
+      <div><h2>Backups</h2><p class="muted" id="server-backup-stats">${backupStatsHtml(backupsForServer(server))}</p></div>
+      <button class="primary" data-server-act="backup" data-server-id="${esc(server.id)}">Create</button>
+    </div>
+    <div class="detail-actions" style="margin-bottom:10px">
+      ${server.active ? `<button data-upload-backup>Upload + Restore</button>` : `<button disabled>Upload + Restore</button>`}
+    </div>
+    <div class="list" id="server-backup-list">${serverBackupRowsHtml(server)}</div>
+  </div>`;
+}
+
+function backupsForServer(server) {
+  const serverId = server?.id || "";
+  return (state.backups || []).filter(backup => {
+    const metaServer = backup.meta?.serverId;
+    if (metaServer) return metaServer === serverId;
+    if (server?.active) return true;
+    return String(backup.id || "").startsWith(serverId + "-");
+  }).sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+}
+
+function backupStatsHtml(backups) {
+  const locked = backups.filter(backup => backup.locked).length;
+  const totalSize = backups.reduce((sum, backup) => sum + Number(backup.sizeBytes || 0), 0);
+  return `${backups.length} backups / ${locked} locked / ${bytes(totalSize)}`;
+}
+
+function serverBackupRowsHtml(server) {
+  const backups = backupsForServer(server);
+  return backups.map(backup => serverBackupRow(backup, server)).join("") || emptyState("No backups for this server", "Create a restore point before changing runtime, add-ons, or world files.");
+}
+
+function serverBackupRow(backup, server) {
+  return `<div class="item compact-item between">
+    <div>
+      <b>${backup.locked ? "[locked] " : ""}${esc(backup.id)}</b>
+      <div class="muted">${bytes(backup.sizeBytes)} / ${new Date(backup.createdAt).toLocaleString()}</div>
+      <div class="dim">${backup.automatic ? "Automatic" : "Manual/uploaded"}${backup.meta?.reason ? ` / ${esc(backup.meta.reason)}` : ""}</div>
+    </div>
+    <div class="row">
+      <button data-lock-backup="${esc(backup.id)}" data-locked="${backup.locked ? "true" : "false"}">${backup.locked ? "Unlock" : "Lock"}</button>
+      <a href="/api/backups/download?id=${encodeURIComponent(backup.id)}"><button>Download</button></a>
+      ${server.active ? `<button data-restore-backup="${esc(backup.id)}">Restore</button>` : ""}
+      <button data-del-backup="${esc(backup.id)}" class="danger">Delete</button>
+    </div>
+  </div>`;
+}
+
+function serverModsCard(server) {
+  return `<div class="card">
+    <div class="section-head">
+      <div><h2>Mods & Plugins</h2><p class="muted" id="server-mod-summary">${serverModsSummary(server)}</p></div>
+    </div>
+    <div class="detail-actions" style="margin-bottom:10px">
+      ${server.active ? `<button data-open-mods>Search Modrinth</button><button data-open-updates>Check Updates</button><button data-upload-mod>Upload JAR</button>` : `<button disabled>Search Modrinth</button><button disabled>Check Updates</button><button disabled>Upload JAR</button>`}
+    </div>
+    <div class="list" id="server-mod-list">${serverModsListHtml(server)}</div>
+  </div>`;
+}
+
+function serverModsSummary(server) {
+  const installed = modsForServer(server);
+  return `${installed.length} installed for ${server.profile?.loader || "runtime"}`;
+}
+
+function serverModsListHtml(server) {
+  const installed = modsForServer(server);
+  return installed.slice(0, 8).map(mod => `<div class="item compact-item between"><div><b>${esc(mod.name || mod.fileName)}</b><div class="muted">${esc(mod.targetFolder || "mods")} / ${mod.installedAt ? new Date(mod.installedAt).toLocaleString() : "installed"}</div></div><button data-uninstall="${esc(mod.fileName)}" data-uninstall-name="${esc(mod.name || mod.fileName)}" data-uninstall-project="${esc(mod.projectId || "")}" data-server-id="${esc(server.id)}" class="danger">Remove</button></div>`).join("") || emptyState("No add-ons installed", "Use Modrinth search or upload a JAR for this server.");
+}
+
+function modsForServer(server) {
+  if (!server) return [];
+  return (state.modsByServer[server.id]?.installed || (server.active ? state.mods?.installed : []) || []);
+}
+
+function serverFilesCard(server) {
+  return `<div class="card">
+    <div class="section-head"><div><h2>Files</h2><p class="muted">Browse, download, upload, and edit files.</p></div></div>
+    <div class="detail-actions">
+      <button data-open-files data-server-id="${esc(server.id)}" class="primary">Open File Browser</button>
+      <button data-open-world>World View</button>
+    </div>
+  </div>`;
+}
+
+function serverAssetsCard(server) {
+  return `<div class="card">
+    <div class="section-head"><div><h2>Assets</h2><p class="muted">Server icon and resource pack uploads.</p></div></div>
+    <div class="detail-actions">
+      <button data-upload-icon>Upload Server Icon</button>
+      <button data-upload-pack>Upload Resource Pack</button>
+    </div>
+  </div>`;
+}
+
+function serverSeedPanel(server) {
+  const seed = seedForServer(server);
+  return `<div class="card">
+    <h2>Seed & Map</h2>
+    <div class="item compact-item"><b>Seed</b><div class="muted">${esc(seed || "Random / unknown")}</div></div>
+    <div class="detail-actions" style="margin-top:10px">
+      <button data-open-world>Open World View</button>
+      ${seed ? `<a target="_blank" href="${chunkbaseUrl(seed)}"><button>Chunkbase</button></a>` : `<button data-server-act="console">Console</button>`}
+    </div>
+    ${seed ? "" : `<p class="muted">Run /seed in the console to let MineMux detect it from logs.</p>`}
+  </div>`;
+}
+
+function seedForServer(server) {
+  const profile = server.profile || {};
+  return server.server?.worldSeed || profile.seed || profile.properties?.["level-seed"] || "";
+}
+
+function wireServerDetailButtons() {
+  document.querySelectorAll("[data-select-card]").forEach(card => {
+    card.onclick = event => {
+      if (event.target.closest("button,a")) return;
+      selectServer(card.dataset.selectCard, { keepFiles: true });
+      render();
+    };
+  });
+  document.querySelectorAll("[data-select-server]").forEach(button => button.onclick = () => { selectServer(button.dataset.selectServer, { keepFiles: true }); render(); });
+  document.querySelectorAll("[data-make-active]").forEach(button => button.onclick = async () => {
+    await run(button, () => post("/api/servers/switch", { serverId: button.dataset.makeActive }));
+    selectServer(button.dataset.makeActive);
+    await refresh(true);
+  });
+  document.querySelectorAll("[data-delete-server]").forEach(button => button.onclick = async () => {
+    if (!confirm("Delete this server and all backups linked to it?")) return;
+    await run(button, () => del("/api/servers/" + encodeURIComponent(button.dataset.deleteServer)));
+    state.selectedServerId = "";
+    resetServerScopedState();
+    await refresh(true);
+  });
+  document.querySelectorAll("[data-save-properties]").forEach(button => button.onclick = () => saveSelectedServerProperties(button));
+  document.querySelectorAll("[data-upload-icon]").forEach(button => button.onclick = () => $("server-icon-upload").click());
+  document.querySelectorAll("[data-upload-pack]").forEach(button => button.onclick = () => $("resource-pack-upload").click());
+  document.querySelectorAll("[data-upload-backup]").forEach(button => button.onclick = () => $("backup-upload").click());
+  document.querySelectorAll("[data-open-files]").forEach(button => button.onclick = async () => { selectServer(button.dataset.serverId || state.selectedServerId); state.filePath = ""; goPage("files"); await loadFiles(); });
+  document.querySelectorAll("[data-open-mods]").forEach(button => button.onclick = () => goPage("mods", true));
+  document.querySelectorAll("[data-open-updates]").forEach(button => button.onclick = () => goPage("updates", true));
+  document.querySelectorAll("[data-open-world]").forEach(button => button.onclick = () => goPage("world", true));
+  document.querySelectorAll("[data-open-setup]").forEach(button => button.onclick = () => goPage("setup"));
+  document.querySelectorAll("[data-upload-mod]").forEach(button => button.onclick = () => $("mod-upload").click());
+  wireServerActionButtons();
+  wireBackupButtons();
+  wireModButtons();
+  wireCopyButtons();
+}
+
+function wireServerActionButtons() {
+  document.querySelectorAll("[data-server-act]").forEach(button => button.onclick = async () => {
+    const action = button.dataset.serverAct;
+    try {
+      if (action === "start") await run(button, () => post("/api/server/start"));
+      if (action === "stop" && confirm("Stop the active server?")) await run(button, () => post("/api/server/stop"));
+      if (action === "restart" && confirm("Restart the active server?")) await run(button, () => post("/api/server/restart"));
+      if (action === "playit-agent-start") await run(button, () => post("/api/playit/agent/start"));
+      if (action === "playit-agent-stop") await run(button, () => post("/api/playit/agent/stop"));
+      if (action === "backup") {
+        await run(button, () => post("/api/backups/create?" + q({ serverId: button.dataset.serverId || selectedServerIdForApi() })));
+        state.backups = (await api("/api/backups")).backups || [];
+      }
+      if (action === "updates") { goPage("updates", true); return; }
+      if (action === "console") { goPage("console"); return; }
+      await refresh(action === "start" || action === "stop" || action === "restart");
+    } catch (error) {
+      notice(error.message, true);
+    }
+  });
+}
+
+async function saveSelectedServerProperties(button) {
+  const server = selectedServer();
+  if (!server) return;
+  await run(button, () => post("/api/config?" + q({ serverId: server.id }), {
+    memoryMb: Number($("cfg-memory").value),
+    maxPlayers: Number($("cfg-players").value),
+    viewDistance: Number($("cfg-view").value),
+    simulationDistance: Number($("cfg-sim").value),
+    motd: $("cfg-motd").value,
+    gamemode: $("cfg-gamemode").value,
+    difficulty: $("cfg-difficulty").value,
+    pvp: $("cfg-pvp").value === "true",
+    onlineMode: $("cfg-online").value === "true",
+    enableCommandBlock: $("cfg-command-blocks").value === "true",
+    whiteList: $("cfg-whitelist").value === "true"
+  }));
+  await refresh(true);
+}
+
+function renderBackups() {
+  $("content").innerHTML = `<div class="grid">${backupSettingsCard()}<div class="card"><div class="between"><h2>Backups</h2><div class="row"><button class="primary" id="create-backup">Create</button><button id="upload-backup">Upload + Restore</button></div></div><div class="list" id="backups-list">${backupsListHtml()}</div></div></div>`;
+  $("create-backup").onclick = async () => { await run($("create-backup"), () => post("/api/backups/create")); state.backups = (await api("/api/backups")).backups || []; render(); };
+  $("upload-backup").onclick = () => $("backup-upload").click();
+  wireBackupButtons();
+  const save = $("save-backup-policy");
+  if (save) save.onclick = async () => {
+    await run(save, () => post("/api/config", {
+      autoBackupEnabled: $("backup-auto-enabled").value === "true",
+      autoBackupIntervalMinutes: Number($("backup-interval").value),
+      autoBackupKeep: Number($("backup-keep").value)
+    }));
+    await refresh();
+  };
+}
+
+function backupsListHtml() {
+  return state.backups.map(backupRow).join("") || emptyState("No backups yet", "Create a restore point before experimenting with updates, files, or add-ons.", `<button class="primary" id="empty-create-backup">Create Backup</button>`);
+}
+
+function updateBackupsListOnly() {
+  const target = $("backups-list");
+  if (!target) return;
+  const next = backupsListHtml();
+  if (target.innerHTML !== next) {
+    target.innerHTML = next;
+    wireBackupButtons();
+  }
+}
+
+function wireBackupButtons() {
+  const emptyCreate = $("empty-create-backup");
+  if (emptyCreate) emptyCreate.onclick = async () => { await run(emptyCreate, () => post("/api/backups/create")); state.backups = (await api("/api/backups")).backups || []; render(); };
+  document.querySelectorAll("[data-del-backup]").forEach(button => button.onclick = async () => {
+    if (!confirm("Delete this backup?")) return;
+    await run(button, () => del("/api/backups/" + encodeURIComponent(button.dataset.delBackup)));
+    state.backups = (await api("/api/backups")).backups || [];
+    if (state.page === "servers") updateServerSummary();
+    if (state.page === "backups") updateBackupsListOnly();
+  });
+  document.querySelectorAll("[data-lock-backup]").forEach(button => button.onclick = async () => {
+    await run(button, () => post("/api/backups/lock?id=" + encodeURIComponent(button.dataset.lockBackup), { locked: button.dataset.locked !== "true" }));
+    state.backups = (await api("/api/backups")).backups || [];
+    if (state.page === "servers") updateServerSummary();
+    if (state.page === "backups") updateBackupsListOnly();
+  });
+  document.querySelectorAll("[data-restore-backup]").forEach(button => button.onclick = async () => {
+    if (!confirm("Restore this backup onto the active server?")) return;
+    await run(button, () => post("/api/backups/restore?id=" + encodeURIComponent(button.dataset.restoreBackup)));
+    await refresh(true);
+  });
+}
+
+function backupSettingsCard() {
+  const policy = state.status?.profile?.backups || {};
+  return `<div class="card"><h2>Backup Settings</h2><p class="muted">Scheduled cleanup only deletes unlocked automatic backups. Manual, uploaded, and locked backups are kept.</p><div class="form">
+    <label>Auto backups<select id="backup-auto-enabled"><option value="true" ${policy.autoEnabled ? "selected" : ""}>Enabled</option><option value="false" ${!policy.autoEnabled ? "selected" : ""}>Disabled</option></select></label>
+    <label>Every<select id="backup-interval">${backupIntervalOptions(policy.intervalMinutes || 360)}</select></label>
+    <label>Keep automatic backups<input id="backup-keep" type="number" min="1" max="100" value="${policy.keepAutoBackups || 5}"></label>
+  </div><div class="row" style="margin-top:12px"><button class="primary" id="save-backup-policy">Save Backup Settings</button></div></div>`;
+}
+
+function backupIntervalOptions(selected) {
+  const options = [[15, "15 minutes"], [30, "30 minutes"], [60, "1 hour"], [180, "3 hours"], [360, "6 hours"], [720, "12 hours"], [1440, "1 day"], [10080, "1 week"]];
+  return options.map(([value, label]) => `<option value="${value}" ${Number(selected) === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function backupRow(b) {
+  return `<div class="item between"><div><b>${b.locked ? "[locked] " : ""}${esc(b.id)}</b><div class="muted">${bytes(b.sizeBytes)} / ${new Date(b.createdAt).toLocaleString()}</div><div class="dim">${b.automatic ? "Automatic backup" : "Manual/uploaded backup"}${b.locked ? " / Locked" : ""}</div></div><div class="row"><button data-lock-backup="${esc(b.id)}" data-locked="${b.locked ? "true" : "false"}">${b.locked ? "Unlock" : "Lock"}</button><a href="/api/backups/download?id=${encodeURIComponent(b.id)}"><button>Download</button></a><button data-del-backup="${esc(b.id)}" class="danger">Delete</button></div></div>`;
+}
+
+function renderMods() {
+  const installed = state.mods?.installed || [];
+  const server = selectedServer();
+  const profile = server?.profile || state.status?.profile || {};
+  $("content").innerHTML = `<div class="mod-browser">
+    <div class="grid">
+      <div class="card">
+        <div class="section-head">
+          <div>
+            <h2>Add-on Browser</h2>
+            <p class="muted">${esc(displayRuntime(profile.loader))} / Minecraft ${esc(profile.minecraftVersion || "-")}</p>
+          </div>
+          <div class="row"><button id="mod-upload-btn">Upload JAR</button><button id="mod-updates">Updates</button></div>
+        </div>
+        <div class="provider-tabs">${modProviderButtons()}</div>
+        ${curseForgeConfigPanel()}
+        <div class="row" style="margin-top:12px">
+          <input id="mod-query" class="grow" placeholder="Search mods, plugins, authors, categories">
+          <button class="primary" id="mod-search">Search</button>
+        </div>
+        <div class="quick-actions" style="margin-top:10px">
+          <button data-mod-preset="spark">Spark</button>
+          <button data-mod-preset="geyser">Geyser</button>
+          <button data-mod-preset="floodgate">Floodgate</button>
+          <button data-mod-preset="chunky">Chunky</button>
+          <button data-mod-preset="lithium">Lithium</button>
+          <button data-mod-preset="worldedit">WorldEdit</button>
+        </div>
+        <div id="mod-results" class="list" style="margin-top:12px">${emptyState("Search add-ons", "Browse Modrinth and CurseForge-compatible files for this server.")}</div>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <div class="between"><h2>Installed</h2><span class="pill blue"><span class="dot"></span>${installed.length}</span></div>
+        <div class="list">${installed.map(modInstalledRow).join("") || emptyState("No add-ons installed", "Search a provider or upload a JAR to add one.")}</div>
+      </div>
+      <div class="card">
+        <h2>Target</h2>
+        <div class="list">
+          <div class="item compact-item between"><span class="muted">Server</span><b>${esc(server?.name || profile.name || "Active server")}</b></div>
+          <div class="item compact-item between"><span class="muted">Runtime</span><b>${esc(displayRuntime(profile.loader))}</b></div>
+          <div class="item compact-item between"><span class="muted">Folder</span><b>${esc(targetFolderForLoader(profile.loader))}</b></div>
+          <div class="item compact-item between"><span class="muted">Minecraft</span><b>${esc(profile.minecraftVersion || "-")}</b></div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+  $("mod-search").onclick = searchMods;
+  $("mod-updates").onclick = () => goPage("updates", true);
+  $("mod-query").addEventListener("keydown", event => { if (event.key === "Enter") searchMods(); });
+  document.querySelectorAll("[data-mod-provider]").forEach(button => button.onclick = () => {
+    state.modProvider = button.dataset.modProvider;
+    renderMods();
+  });
+  document.querySelectorAll("[data-mod-preset]").forEach(button => button.onclick = () => {
+    $("mod-query").value = button.dataset.modPreset;
+    searchMods();
+  });
+  $("mod-upload-btn").onclick = () => $("mod-upload").click();
+  const saveKey = $("curseforge-save-key");
+  if (saveKey) saveKey.onclick = saveCurseForgeKey;
+  const clearKey = $("curseforge-clear-key");
+  if (clearKey) clearKey.onclick = clearCurseForgeKey;
+  wireModButtons();
+}
+
+function modProviderButtons() {
+  const providers = state.modProviders?.providers || [
+    { id: "modrinth", name: "Modrinth", enabled: true, configured: true },
+    { id: "curseforge", name: "CurseForge", enabled: false, configured: false }
+  ];
+  const allActive = state.modProvider === "all";
+  const buttons = [`<button data-mod-provider="all" class="${allActive ? "active" : ""}">All</button>`];
+  providers.forEach(provider => {
+    const active = state.modProvider === provider.id;
+    buttons.push(`<button data-mod-provider="${esc(provider.id)}" class="${active ? "active" : ""}" ${provider.enabled ? "" : ""}>${esc(provider.name)}${provider.enabled ? "" : " needs key"}</button>`);
+  });
+  return buttons.join("");
+}
+
+function curseForgeConfigured() {
+  return Boolean((state.modProviders?.providers || []).find(provider => provider.id === "curseforge")?.configured);
+}
+
+function curseForgeConfigPanel() {
+  if (state.modProvider !== "curseforge" && state.modProvider !== "all") return "";
+  if (curseForgeConfigured()) {
+    return `<div class="inline-note" style="margin-top:12px"><div class="between"><span>CurseForge is configured.</span><button id="curseforge-clear-key">Remove Key</button></div></div>`;
+  }
+  return `<div class="inline-note" style="margin-top:12px">
+    <b>CurseForge needs an API key</b>
+    <div class="muted">Modrinth works without one. Paste a CurseForge Core API key to enable CurseForge search and installs on this device.</div>
+    <div class="row" style="margin-top:10px"><input id="curseforge-api-key" class="grow" type="password" placeholder="CurseForge API key"><button id="curseforge-save-key">Save Key</button></div>
+  </div>`;
+}
+
+async function saveCurseForgeKey() {
+  const input = $("curseforge-api-key");
+  const apiKey = input?.value.trim();
+  if (!apiKey) return notice("Paste a CurseForge API key first.", true);
+  await post("/api/mods/curseforge/key", { apiKey });
+  state.modProviders = await api("/api/mods/providers");
+  notice("CurseForge enabled");
+  renderMods();
+}
+
+async function clearCurseForgeKey() {
+  await del("/api/mods/curseforge/key");
+  state.modProviders = await api("/api/mods/providers");
+  state.modProvider = "modrinth";
+  notice("CurseForge key removed");
+  renderMods();
+}
+
+function modInstalledRow(mod) {
+  return `<div class="item compact-item between">
+    <div><b>${esc(mod.name || mod.fileName)}</b><div class="muted">${esc(mod.source || "manual")} / ${esc(mod.targetFolder || "mods")} / ${mod.installedAt ? new Date(mod.installedAt).toLocaleString() : "installed"}</div><div class="dim">${esc(mod.fileName || "")}${mod.phoneSafety ? " / " + esc(mod.phoneSafety) : ""}</div></div>
+    <button data-uninstall="${esc(mod.fileName)}" data-uninstall-name="${esc(mod.name || mod.fileName)}" data-uninstall-project="${esc(mod.projectId || "")}" class="danger">Remove</button>
+  </div>`;
+}
+
+function targetFolderForLoader(loader) {
+  loader = String(loader || "").toLowerCase();
+  return loader === "paper" || loader === "spigot" ? "plugins" : "mods";
+}
+
+function wireModButtons() {
+  document.querySelectorAll("[data-uninstall]").forEach(button => button.onclick = async () => {
+    const serverId = button.dataset.serverId || selectedServerIdForApi();
+    const mod = { fileName: button.dataset.uninstall, name: button.dataset.uninstallName || button.dataset.uninstall, projectId: button.dataset.uninstallProject || "" };
+    if (!confirm(`Remove ${mod.name || mod.fileName}?`)) return;
+    const proceed = await maybeCleanupWorldForMods(button, [mod], serverId, "remove");
+    if (!proceed) return;
+    await run(button, () => post("/api/mods/uninstall?" + q({ fileName: button.dataset.uninstall, serverId })));
+    try { state.modsByServer[serverId] = await api("/api/mods?" + q({ serverId })); } catch { state.modsByServer[serverId] = { installed: [] }; }
+    if (selectedServer()?.active) state.mods = state.modsByServer[serverId];
+    if (state.page === "servers") updateServerSummary();
+    if (state.page === "mods") renderMods();
+  });
+}
+
+async function maybeCleanupWorldForMods(button, mods, serverId, actionLabel = "remove") {
+  const names = mods.map(mod => mod.currentName || mod.name || mod.fileName).filter(Boolean).join(", ");
+  if (!confirm(`Scan the world for blocks and entities from ${names} before ${actionLabel}?`)) return true;
+  const defaults = [...new Set(mods.map(inferModNamespace).filter(Boolean))].join(", ");
+  const raw = prompt("Mod block namespace(s) to scan, comma separated:", defaults);
+  if (raw === null) return false;
+  const namespaces = raw.split(",").map(value => value.trim()).filter(Boolean);
+  if (!namespaces.length) return confirm(`No namespace entered. Continue ${actionLabel} without world cleanup?`);
+  const scan = await run(button, () => post("/api/world/mods/scan?" + q({ serverId }), { namespaces }));
+  const total = (scan.totalBlocks || 0) + (scan.totalBlockEntities || 0) + (scan.totalEntities || 0);
+  if (!total) {
+    notice("No matching world blocks or entities found.");
+    return true;
+  }
+  const summary = modWorldScanSummary(scan);
+  if (!confirm(`${summary}\n\nReplace matching blocks with air and remove matching entities before continuing?`)) {
+    return confirm(`Continue ${actionLabel} without cleaning these world references?`);
+  }
+  const cleaned = await run(button, () => post("/api/world/mods/cleanup?" + q({ serverId }), { namespaces }));
+  notice(`World cleanup done. Backup: ${cleaned.backupId || "created"}`);
+  return true;
+}
+
+function inferModNamespace(mod = {}) {
+  const projectId = String(mod.projectId || mod.projectID || "");
+  const uuidLike = /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(projectId);
+  const raw = uuidLike ? (mod.name || mod.currentName || mod.fileName || "") : (projectId || mod.name || mod.currentName || mod.fileName || "");
+  const base = String(raw).replace(/\.jar$/i, "").toLowerCase();
+  const first = base.split(/[\s_-]+/).find(Boolean) || base;
+  return first.replace(/[^a-z0-9_.-]/g, "");
+}
+
+function modWorldScanSummary(scan = {}) {
+  const lines = [
+    `Found ${scan.totalBlocks || 0} blocks, ${scan.totalBlockEntities || 0} block entities, and ${scan.totalEntities || 0} entities.`,
+    `Matched chunks: ${scan.totalChunksMatched || 0} / ${scan.totalChunksScanned || 0}.`
+  ];
+  (scan.dimensions || []).forEach(dim => {
+    if ((dim.blocks || 0) + (dim.blockEntities || 0) + (dim.entities || 0) > 0) {
+      lines.push(`${dim.dimension}: ${dim.blocks || 0} blocks, ${dim.blockEntities || 0} block entities, ${dim.entities || 0} entities`);
+    }
+  });
+  return lines.join("\n");
+}
+
+async function searchMods() {
+  const query = $("mod-query").value.trim();
+  if (!query) return;
+  const serverId = selectedServerIdForApi();
+  const results = $("mod-results");
+  results.innerHTML = `<div class="item">Searching ${esc(providerSearchLabel())}...</div>`;
+  try {
+    const res = await api("/api/mods/search?" + q({ query, provider: state.modProvider, serverId }));
+    results.innerHTML = (res.hits || []).slice(0, 24).map(hit => modResultCard(hit, serverId)).join("") || emptyState("No matching projects", "Try a different project name or upload a JAR manually.", `<button data-upload-mod>Upload JAR</button>`);
+    document.querySelectorAll("[data-upload-mod]").forEach(button => button.onclick = () => $("mod-upload").click());
+    wireModResultButtons();
+  } catch (error) {
+    results.innerHTML = `<div class="item"><b>Search failed</b><div class="muted">${esc(error.message)}</div></div>`;
+  }
+}
+
+function providerSearchLabel() {
+  if (state.modProvider === "all") return "providers";
+  return providerLabel(state.modProvider);
+}
+
+function providerLabel(provider) {
+  if (provider === "curseforge") return "CurseForge";
+  if (provider === "modrinth") return "Modrinth";
+  return "All";
+}
+
+function displayRuntime(loader) {
+  return loader ? loader.charAt(0).toUpperCase() + loader.slice(1) : "Runtime";
+}
+
+function modResultCard(hit, serverId) {
+  const compatible = hit.compatible !== false;
+  const reason = hit.compatibilityReason || (compatible ? "Compatible with this server" : "Not compatible with this server");
+  const projectId = hit.project_id || hit.projectId;
+  const provider = hit.provider || "modrinth";
+  const icon = hit.icon_url ? `<img class="mod-icon" src="${esc(hit.icon_url)}" alt="">` : `<div class="mod-icon runtime">${esc(providerLabel(provider).slice(0, 1))}</div>`;
+  const categories = (hit.categories || []).slice(0, 5).map(category => `<span class="pill">${esc(category)}</span>`).join("");
+  const versions = (hit.versions || []).slice(0, 5).join(", ");
+  const loaders = (hit.supportedLoaders || []).slice(0, 5).join(", ");
+  return `<div class="item mod-card" data-mod-card="${esc(provider)}-${esc(projectId)}">
+    ${icon}
+    <div class="grow">
+      <div class="between">
+        <div><b>${esc(hit.title)}</b><div class="muted">${esc(hit.author ? "by " + hit.author : providerLabel(provider))} / ${formatDownloads(hit.downloads)} downloads</div></div>
+        <span class="pill ${compatible ? "green" : "amber"}"><span class="dot"></span>${compatible ? "Ready" : "Blocked"}</span>
+      </div>
+      <p class="muted">${esc(hit.description || "")}</p>
+      <div class="mod-meta"><span class="pill blue">${esc(providerLabel(provider))}</span>${categories}</div>
+      <div class="dim" style="margin-top:8px">${esc(reason)}${versions ? " / MC " + esc(versions) : ""}${loaders ? " / " + esc(loaders) : ""}</div>
+      <div class="mod-version-tools">
+        <select data-version-select="${esc(projectId)}" data-provider="${esc(provider)}"><option value="">Latest compatible</option></select>
+        <button data-load-versions="${esc(projectId)}" data-provider="${esc(provider)}">Versions</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button data-install="${esc(projectId)}" data-provider="${esc(provider)}" data-server-id="${esc(serverId)}" ${compatible ? "" : "disabled"}>${compatible ? "Install" : "Incompatible"}</button>
+        ${hit.websiteUrl ? `<a href="${esc(hit.websiteUrl)}" target="_blank"><button>Open Page</button></a>` : ""}
+      </div>
+    </div>
+  </div>`;
+}
+
+function formatDownloads(value) {
+  value = Number(value || 0);
+  if (value >= 1000000) return (value / 1000000).toFixed(1) + "M";
+  if (value >= 1000) return (value / 1000).toFixed(1) + "K";
+  return String(value);
+}
+
+function wireModResultButtons() {
+  document.querySelectorAll("[data-load-versions]").forEach(button => button.onclick = () => loadModVersions(button));
+  document.querySelectorAll("[data-install]").forEach(button => button.onclick = () => installSelectedMod(button));
+}
+
+async function loadModVersions(button) {
+  const select = modVersionSelect(button.dataset.loadVersions, button.dataset.provider);
+  if (!select) return;
+  button.disabled = true;
+  try {
+    const data = await api("/api/mods/versions?" + q({ provider: button.dataset.provider, projectId: button.dataset.loadVersions, serverId: selectedServerIdForApi() }));
+    const versions = data.versions || [];
+    select.innerHTML = `<option value="">Latest compatible</option>` + versions.map(version => {
+      const label = `${version.versionNumber || version.name || version.id} / ${version.releaseType || "release"}${version.fileName ? " / " + version.fileName : ""}`;
+      return `<option value="${esc(version.id)}">${esc(label)}</option>`;
+    }).join("");
+    notice(`${versions.length} versions loaded`);
+  } catch (error) {
+    notice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function installSelectedMod(button) {
+  const serverId = button.dataset.serverId;
+  const provider = button.dataset.provider || "modrinth";
+  const projectId = button.dataset.install;
+  const select = modVersionSelect(projectId, provider);
+  const versionId = select?.value || "";
+  try {
+    await run(button, () => post("/api/mods/install?" + q({ serverId }), { provider, projectId, versionId }));
+    state.modsByServer[serverId] = await api("/api/mods?" + q({ serverId }));
+    state.mods = state.modsByServer[serverId];
+    await refresh(true);
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+function modVersionSelect(projectId, provider) {
+  return Array.from(document.querySelectorAll("[data-version-select]")).find(select => select.dataset.versionSelect === projectId && select.dataset.provider === provider);
+}
+
+function renderUpdates() {
+  const server = selectedServer();
+  const plan = state.updates;
+  if (!server) {
+    $("content").innerHTML = `<div class="card">${emptyState("No server selected", "Create or select a server before checking updates.", `<button class="primary" data-open-setup>Create Server</button>`)}</div>`;
+    document.querySelectorAll("[data-open-setup]").forEach(button => button.onclick = () => goPage("setup"));
+    return;
+  }
+  if (!plan) {
+    $("content").innerHTML = `<div class="card"><h2>Updates</h2><p class="muted">Checking ${esc(server.name || server.id)}...</p></div>`;
+    loadUpdatePlan(true);
+    return;
+  }
+  if (plan.error) {
+    $("content").innerHTML = `<div class="card"><div class="section-head"><div><h2>Updates</h2><p class="muted">${esc(plan.error)}</p></div><button id="check-updates">Retry</button></div></div>`;
+    $("check-updates").onclick = () => loadUpdatePlan(true);
+    return;
+  }
+  const mc = plan.minecraft || {};
+  const mods = plan.mods || [];
+  const available = mods.filter(mod => mod.updateAvailable).length;
+  const blockers = (plan.blockers || []).length;
+  const runtimeChecked = mc.runtimeRefreshAvailable ? "checked" : "";
+  const runtimeWork = Boolean(mc.runtimeRefreshAvailable || mc.updateAvailable);
+  const modWork = mods.some(mod => mod.updateAvailable || mod.status === "available");
+  const choicesNeeded = blockers > 0;
+  const allCurrent = !runtimeWork && !modWork && !choicesNeeded;
+  const stopNote = plan.requiresStop ? `<div class="inline-note">Stop this server before applying updates.</div>` : "";
+  const readyNote = allCurrent ? `<div class="inline-note">Everything tracked is current for this server.</div>` : "";
+  $("content").innerHTML = `<div class="grid">
+    <div class="card">
+      <div class="section-head">
+        <div>
+          <h2>${esc(server.name || server.id)}</h2>
+          <p class="muted">Minecraft ${esc(mc.currentVersion || "-")} / ${esc(mc.loader || "-")}</p>
+        </div>
+        <div class="row">
+          <button id="check-updates">Check</button>
+          ${plan.requiresStop ? `<button class="danger" id="stop-for-updates">Stop Server</button>` : ""}
+          <button class="primary" id="apply-updates" ${(plan.requiresStop || allCurrent) ? "disabled" : ""}>Apply Updates</button>
+        </div>
+      </div>
+      ${stopNote}
+      ${readyNote}
+      <div class="server-kv-grid" style="margin-top:12px">
+        <div class="mini-card"><span class="muted">Minecraft</span><b>${esc(mc.currentVersion || "-")} -> ${esc(mc.targetVersion || "-")}</b></div>
+        <div class="mini-card"><span class="muted">Runtime</span><b>${mc.runtimeRefreshAvailable ? "Refresh ready" : "No target"}</b></div>
+        <div class="mini-card"><span class="muted">Add-ons</span><b>${available} updates</b></div>
+        <div class="mini-card"><span class="muted">Choices</span><b>${blockers}</b></div>
+      </div>
+    </div>
+    <div class="cols">
+      <div class="grid">
+        <div class="card">
+          <div class="section-head">
+            <div><h2>Minecraft + Runtime</h2><p class="muted">${esc(mc.message || "Runtime/build refresh available.")}</p></div>
+            <span class="pill ${mc.updateAvailable ? "green" : ""}"><span class="dot"></span>${mc.updateAvailable ? "Version update" : "Runtime refresh"}</span>
+          </div>
+          <label style="display:flex;align-items:center;gap:10px;margin-top:12px"><input id="update-runtime" type="checkbox" style="width:auto" ${runtimeChecked}>Update runtime for Minecraft ${esc(mc.targetVersion || mc.currentVersion || "-")}</label>
+          ${mc.warning ? `<p class="hint">${esc(mc.warning)}</p>` : ""}
+        </div>
+      </div>
+      <div class="grid">
+        <div class="card">
+          <div class="section-head"><div><h2>Managed Add-ons</h2><p class="muted">${mods.length} tracked</p></div></div>
+          <div class="list">${mods.map(updateModRow).join("") || emptyState("No tracked add-ons", "Install from Modrinth to let MineMux manage add-on updates.", `<button data-open-mods>Add Add-ons</button>`)}</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+  $("check-updates").onclick = () => loadUpdatePlan(true);
+  $("apply-updates").onclick = () => applyUpdates($("apply-updates"));
+  const stop = $("stop-for-updates");
+  if (stop) stop.onclick = async () => { await run(stop, () => post("/api/server/stop")); await refresh(true); };
+  const runtime = $("update-runtime");
+  if (runtime) runtime.onchange = syncUpdateApplyButton;
+  document.querySelectorAll("[data-mod-choice]").forEach(select => select.onchange = syncUpdateApplyButton);
+  document.querySelectorAll("[data-open-mods]").forEach(button => button.onclick = () => goPage("mods", true));
+  syncUpdateApplyButton();
+}
+
+function syncUpdateApplyButton() {
+  const button = $("apply-updates");
+  if (!button || !state.updates || state.updates.requiresStop) return;
+  const runtimeSelected = $("update-runtime")?.checked || false;
+  const modSelected = Array.from(document.querySelectorAll("[data-mod-choice]")).some(select => select.value !== "ignore");
+  button.disabled = !(runtimeSelected || modSelected);
+}
+
+function updateModRow(mod) {
+  const label = mod.currentName || mod.fileName;
+  const detail = mod.status === "available"
+    ? `${mod.targetName || mod.targetFileName || "Latest compatible version"}`
+    : (mod.reason || (mod.status === "current" ? "Current compatible version is installed." : "Needs a choice."));
+  const pill = mod.status === "available" ? "green" : (mod.status === "current" ? "" : "amber");
+  return `<div class="item compact-item between">
+    <div class="grow">
+      <b>${esc(label)}</b>
+      <div class="muted">${esc(mod.targetFolder || "mods")} / ${esc(detail)}</div>
+    </div>
+    <div class="row">
+      <span class="pill ${pill}"><span class="dot"></span>${esc(updateStatusLabel(mod.status))}</span>
+      ${updateChoiceSelect(mod)}
+    </div>
+  </div>`;
+}
+
+function updateStatusLabel(status) {
+  if (status === "available") return "Update";
+  if (status === "unavailable") return "Blocked";
+  if (status === "manual") return "Manual";
+  return "Current";
+}
+
+function updateChoiceSelect(mod) {
+  const key = updateChoiceKey(mod);
+  if (!key) return "";
+  if (mod.status === "available") {
+    return `<select style="width:auto;min-width:130px" data-mod-choice="${esc(key)}"><option value="update">Update</option><option value="ignore">Ignore</option><option value="disable">Disable</option></select>`;
+  }
+  if (mod.status === "unavailable" || mod.status === "manual") {
+    return `<select style="width:auto;min-width:150px" data-mod-choice="${esc(key)}"><option value="ignore">Ignore</option><option value="disable">Disable</option><option value="manual">Upload manually</option></select>`;
+  }
+  return "";
+}
+
+function updateChoiceKey(mod) {
+  return mod.projectId || mod.fileName || "";
+}
+
+async function loadUpdatePlan(renderAfter = true) {
+  try {
+    state.updates = await api("/api/updates?" + q({ serverId: selectedServerIdForApi() }));
+  } catch (error) {
+    state.updates = { error: error.message, mods: [], blockers: [] };
+  }
+  if (renderAfter && state.page === "updates") renderUpdates();
+}
+
+async function applyUpdates(button) {
+  const plan = state.updates;
+  if (!plan || plan.error) return;
+  const choices = {};
+  let manualSelected = false;
+  document.querySelectorAll("[data-mod-choice]").forEach(select => {
+    choices[select.dataset.modChoice] = select.value;
+    if (select.value === "manual") manualSelected = true;
+  });
+  const disabledMods = (plan.mods || []).filter(mod => choices[updateChoiceKey(mod)] === "disable" || choices[mod.fileName] === "disable");
+  if (disabledMods.length) {
+    const proceed = await maybeCleanupWorldForMods(button, disabledMods, selectedServerIdForApi(), "disabling during update");
+    if (!proceed) return;
+  }
+  try {
+    const result = await run(button, () => post("/api/updates/apply?" + q({ serverId: selectedServerIdForApi() }), {
+      updateMinecraft: $("update-runtime")?.checked || false,
+      targetMinecraftVersion: plan.minecraft?.targetVersion || "",
+      updateMods: (plan.mods || []).length > 0,
+      modChoices: choices
+    }));
+    state.updates = result.plan || null;
+    if (manualSelected) $("mod-upload").click();
+    await refresh(true);
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+function renderWorld() {
+  const data = state.world.data;
+  const trimDisabled = !state.world.trimAreas.length || !data?.chunks?.length;
+  $("content").innerHTML = `<div class="grid">
+    <div class="card">
+      <div class="world-toolbar">
+        <div class="row">
+          <select id="world-dimension">${worldDimensionOptions(data)}</select>
+          <button id="world-reload">Reload</button>
+          <button id="world-reset">Reset View</button>
+          <button id="world-origin">Jump 0,0</button>
+        </div>
+        <label class="world-limit">
+          <span>Chunks</span>
+          <input id="world-limit-slider" type="range" min="0" max="${WORLD_LIMIT_STEPS.length - 1}" step="1" value="${closestWorldLimitIndex(state.world.limit)}">
+          <b id="world-limit-readout">${formatDownloads(state.world.limit)} chunks</b>
+        </label>
+        <div class="world-zoom-tools">
+          <button id="world-zoom-out">-</button>
+          <span class="pill"><span class="dot"></span><span id="world-zoom-label">${worldZoomLabel()}</span></span>
+          <button id="world-zoom-in">+</button>
+        </div>
+        <div class="row">
+          <button id="world-trim-mode" class="${state.world.trimMode ? "primary" : ""}">${state.world.trimMode ? "Drawing Keep Areas" : "Draw Keep Area"}</button>
+          <button id="world-trim-undo" ${state.world.trimAreas.length ? "" : "disabled"}>Undo Area</button>
+          <button id="world-trim-clear" ${state.world.trimAreas.length ? "" : "disabled"}>Clear</button>
+          <button id="world-trim-apply" class="danger" ${trimDisabled ? "disabled" : ""}>Trim Outside</button>
+        </div>
+      </div>
+      <div class="world-canvas-wrap">
+        <canvas id="world-canvas" class="world-canvas ${state.world.trimMode ? "trimming" : ""}"></canvas>
+        <div class="world-coordinates" id="world-coordinates">${worldCoordinateHtml()}</div>
+        <div class="world-legend" id="world-legend">${worldLegendHtml(data)}</div>
+      </div>
+      <div class="world-trim-panel" id="world-trim-panel">${worldTrimPanelHtml(data)}</div>
+      <div class="world-trim-panel" id="world-player-panel">${worldPlayerPanelHtml()}</div>
+    </div>
+  </div>`;
+  wireWorldControls();
+  if (!data || data.dimension !== state.world.dimension) {
+    loadWorldMap(true);
+  } else {
+    drawWorldMap();
+  }
+}
+
+function worldDimensionOptions(data) {
+  const dimensions = data?.availableDimensions || [
+    { id: "overworld", name: "Overworld", available: true },
+    { id: "nether", name: "Nether", available: true },
+    { id: "end", name: "End", available: true }
+  ];
+  return dimensions.map(dim => `<option value="${esc(dim.id)}" ${dim.id === state.world.dimension ? "selected" : ""} ${dim.available ? "" : "disabled"}>${esc(dim.name)}${dim.available ? ` (${dim.regionFiles || 0})` : " (not generated)"}</option>`).join("");
+}
+
+function worldLegendHtml(data) {
+  if (!data) return `<b>Loading world...</b><div class="muted">Reading generated region files from the active server.</div>`;
+  if (data.warning && !data.chunks?.length) return `<b>${esc(data.warning)}</b>`;
+  if (!data.chunks?.length) return `<b>No generated chunks found.</b><div class="muted">Start and explore this dimension first.</div>`;
+  const trim = state.world.trimAreas.length ? `<div class="muted">${state.world.trimAreas.length} keep area${state.world.trimAreas.length === 1 ? "" : "s"} selected</div>` : "";
+  const total = Number(data.totalChunks || data.chunks.length);
+  const mode = "full-resolution lazy detail";
+  const shown = total > data.chunks.length ? `${formatDownloads(data.chunks.length)} of ${formatDownloads(total)}` : formatDownloads(data.chunks.length);
+  const warning = data.warning ? `<div class="hint">${esc(data.warning)}</div>` : "";
+  return `<b>${shown} chunks</b><div class="muted">${esc(data.worldName || "world")} / ${esc(data.dimension)} / ${mode}</div>${warning}${trim}`;
+}
+
+function worldTrimPanelHtml(data) {
+  const areas = state.world.trimAreas;
+  const generated = worldSelectedGeneratedCount(data);
+  const areaText = areas.length ? `${areas.length} keep area${areas.length === 1 ? "" : "s"} / ${generated} visible generated chunks inside` : "No keep areas selected";
+  const warning = data?.truncated ? `<div class="hint">The map is limited. Trim still applies to every generated region file in this dimension, including chunks outside the preview.</div>` : `<div class="hint">Trimming keeps selected chunks in this dimension and deletes generated chunks outside them. MineMux creates a restore point first.</div>`;
+  const list = areas.map((area, index) => `<div class="item compact-item between"><div><b>Area ${index + 1}</b><div class="muted">${trimAreaLabel(area)}</div></div><button data-remove-trim-area="${index}">Remove</button></div>`).join("");
+  return `<div class="world-trim-row"><div><b>World Trim</b><div class="muted">${esc(areaText)}</div></div><span class="pill ${state.world.trimMode ? "green" : "amber"}"><span class="dot"></span>${state.world.trimMode ? "Draw mode" : "Pan mode"}</span></div>${warning}${list ? `<div class="list">${list}</div>` : ""}`;
+}
+
+function worldZoomLabel() {
+  const chunkPixels = 16 * Number(state.world.scale || 1);
+  if (chunkPixels >= 10) return `${chunkPixels.toFixed(0)} px/chunk`;
+  if (chunkPixels >= 1) return `${chunkPixels.toFixed(1)} px/chunk`;
+  return `${chunkPixels.toFixed(2)} px/chunk`;
+}
+
+function worldCoordinateHtml() {
+  const point = state.world.pointer;
+  if (!point) return `<div>Move over the map</div><div class="muted">X/Z and chunk coordinates show here.</div>`;
+  return `<div>X ${Math.floor(point.blockX)}, Y -, Z ${Math.floor(point.blockZ)}</div><div class="muted">Chunk ${point.chunkX}, ${point.chunkZ} / ${esc(state.world.dimension)}</div>`;
+}
+
+function worldPlayerPanelHtml() {
+  const players = state.world.players || [];
+  const rows = players.map(player => {
+    const available = player.available !== false && Number.isFinite(Number(player.x)) && Number.isFinite(Number(player.z));
+    const dim = normalizeWorldDimension(player.dimension || "");
+    const location = available
+      ? `X ${Math.floor(player.x)}, Y ${Math.floor(player.y || 0)}, Z ${Math.floor(player.z)} / ${dim || "unknown"}`
+      : (player.error || "Position unavailable");
+    return `<div class="item compact-item between">
+      <div><b>${esc(player.name || "Player")}</b><div class="muted">${esc(location)}</div></div>
+      <button data-world-player-jump="${esc(player.name || "")}" ${available ? "" : "disabled"}>Jump To</button>
+    </div>`;
+  }).join("");
+  const status = state.world.playersLoading ? "Refreshing player positions..." : (players.length ? `${players.length} online player${players.length === 1 ? "" : "s"}` : "No online players");
+  return `<div class="world-trim-row"><div><b>Players</b><div class="muted">${esc(status)}</div></div><button id="world-players-refresh">Refresh Players</button></div>${rows ? `<div class="list">${rows}</div>` : ""}`;
+}
+
+function resetWorldRenderCaches() {
+  state.world.bitmap = null;
+  state.world.detailCache = new Map();
+  state.world.detailRequestKey = "";
+  window.clearTimeout(state.world.detailTimer);
+  state.world.detailTimer = null;
+  state.world.detailInflightTiles = new Set();
+  state.world.detailLoadedTiles = new Set();
+  state.world.detailFailedTiles = new Map();
+  state.world.detailToken++;
+}
+
+function wireWorldControls() {
+  $("world-dimension").onchange = event => {
+    state.world.dimension = event.target.value;
+    state.world.data = null;
+    resetWorldRenderCaches();
+    state.world.centered = false;
+    state.world.trimAreas = [];
+    state.world.trimDraft = null;
+    state.world.trimAnchor = null;
+    state.world.players = [];
+    loadWorldMap(true);
+    loadWorldPlayers();
+  };
+  const limitSlider = $("world-limit-slider");
+  limitSlider.oninput = () => {
+    state.world.limit = worldLimitValue();
+    updateWorldLimitReadout();
+  };
+  limitSlider.onchange = () => {
+    state.world.limit = worldLimitValue();
+    state.world.data = null;
+    resetWorldRenderCaches();
+    state.world.centered = false;
+    loadWorldMap(true);
+  };
+  $("world-reload").onclick = () => loadWorldMap(false);
+  $("world-reset").onclick = () => {
+    state.world.centered = false;
+    drawWorldMap();
+  };
+  $("world-origin").onclick = () => centerWorldOnBlock(0, 0, Math.max(state.world.scale, 1.8));
+  $("world-zoom-in").onclick = () => zoomWorldAtCanvasCenter(1.65);
+  $("world-zoom-out").onclick = () => zoomWorldAtCanvasCenter(1 / 1.65);
+  $("world-trim-mode").onclick = () => {
+    state.world.trimMode = !state.world.trimMode;
+    state.world.trimDraft = null;
+    state.world.trimAnchor = null;
+    renderWorld();
+  };
+  $("world-trim-undo").onclick = () => {
+    state.world.trimAreas.pop();
+    renderWorld();
+  };
+  $("world-trim-clear").onclick = () => {
+    state.world.trimAreas = [];
+    state.world.trimDraft = null;
+    state.world.trimAnchor = null;
+    renderWorld();
+  };
+  $("world-trim-apply").onclick = () => applyWorldTrim($("world-trim-apply"));
+  document.querySelectorAll("[data-remove-trim-area]").forEach(button => button.onclick = () => {
+    state.world.trimAreas.splice(Number(button.dataset.removeTrimArea), 1);
+    renderWorld();
+  });
+  $("world-players-refresh").onclick = () => loadWorldPlayers(true);
+  document.querySelectorAll("[data-world-player-jump]").forEach(button => {
+    button.onclick = () => jumpToWorldPlayer(button.dataset.worldPlayerJump);
+  });
+  const canvas = $("world-canvas");
+  let lastX = 0;
+  let lastY = 0;
+  canvas.onpointerdown = event => {
+    if (state.world.trimMode) {
+      const point = worldPointerChunk(canvas, event);
+      state.world.drawingTrim = true;
+      state.world.trimAnchor = point;
+      state.world.trimDraft = normalizeTrimArea(point, point);
+      canvas.setPointerCapture?.(event.pointerId);
+      drawWorldMap();
+      return;
+    }
+    state.world.dragging = true;
+    canvas.classList.add("dragging");
+    canvas.setPointerCapture?.(event.pointerId);
+    lastX = event.clientX;
+    lastY = event.clientY;
+  };
+  const endDrag = event => {
+    if (state.world.drawingTrim) {
+      const point = worldPointerChunk(canvas, event);
+      state.world.trimDraft = normalizeTrimArea(state.world.trimAnchor, point);
+      state.world.trimAreas.push(state.world.trimDraft);
+      state.world.trimDraft = null;
+      state.world.trimAnchor = null;
+      state.world.drawingTrim = false;
+      if (event?.pointerId !== undefined) canvas.releasePointerCapture?.(event.pointerId);
+      renderWorld();
+      return;
+    }
+    state.world.dragging = false;
+    canvas.classList.remove("dragging");
+    if (event?.pointerId !== undefined) canvas.releasePointerCapture?.(event.pointerId);
+  };
+  canvas.onpointerup = endDrag;
+  canvas.onpointercancel = endDrag;
+  canvas.onpointerleave = endDrag;
+  canvas.onpointermove = event => {
+    updateWorldPointer(canvas, event);
+    if (state.world.drawingTrim) {
+      const point = worldPointerChunk(canvas, event);
+      state.world.trimDraft = normalizeTrimArea(state.world.trimAnchor, point);
+      drawWorldMap();
+      return;
+    }
+    if (!state.world.dragging) return;
+    state.world.offsetX += event.clientX - lastX;
+    state.world.offsetY += event.clientY - lastY;
+    lastX = event.clientX;
+    lastY = event.clientY;
+    drawWorldMap();
+  };
+  canvas.onpointerenter = event => updateWorldPointer(canvas, event);
+  canvas.onpointerleave = event => {
+    if (!state.world.dragging && !state.world.drawingTrim) {
+      state.world.pointer = null;
+      updateWorldCoordinates();
+    }
+    endDrag(event);
+  };
+  canvas.onwheel = event => {
+    event.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    zoomWorldAtPoint(event.deltaY < 0 ? 1.22 : 1 / 1.22, event.clientX - rect.left, event.clientY - rect.top);
+  };
+  loadWorldPlayers();
+}
+
+function worldPointerChunk(canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  const blockX = (event.clientX - rect.left - state.world.offsetX) / state.world.scale;
+  const blockZ = (event.clientY - rect.top - state.world.offsetY) / state.world.scale;
+  return { x: Math.floor(blockX / 16), z: Math.floor(blockZ / 16) };
+}
+
+function normalizeTrimArea(start, point) {
+  const sx = start?.x ?? start?.minChunkX ?? point.x;
+  const sz = start?.z ?? start?.minChunkZ ?? point.z;
+  return {
+    minChunkX: Math.min(sx, point.x),
+    maxChunkX: Math.max(sx, point.x),
+    minChunkZ: Math.min(sz, point.z),
+    maxChunkZ: Math.max(sz, point.z)
+  };
+}
+
+function worldScreenToBlock(canvas, clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    blockX: (clientX - rect.left - state.world.offsetX) / state.world.scale,
+    blockZ: (clientY - rect.top - state.world.offsetY) / state.world.scale
+  };
+}
+
+function updateWorldPointer(canvas, event) {
+  const point = worldScreenToBlock(canvas, event.clientX, event.clientY);
+  state.world.pointer = {
+    blockX: point.blockX,
+    blockZ: point.blockZ,
+    chunkX: Math.floor(point.blockX / 16),
+    chunkZ: Math.floor(point.blockZ / 16)
+  };
+  updateWorldCoordinates();
+}
+
+function updateWorldCoordinates() {
+  const node = $("world-coordinates");
+  if (node) node.innerHTML = worldCoordinateHtml();
+}
+
+function normalizeWorldScale(value) {
+  return Math.max(WORLD_MIN_SCALE, Math.min(WORLD_MAX_SCALE, Number(value) || 1));
+}
+
+function zoomWorldAtCanvasCenter(factor) {
+  const canvas = $("world-canvas");
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  zoomWorldAtPoint(factor, rect.width / 2, rect.height / 2);
+}
+
+function zoomWorldAtPoint(factor, screenX, screenY) {
+  const oldScale = state.world.scale;
+  const nextScale = normalizeWorldScale(oldScale * factor);
+  if (Math.abs(nextScale - oldScale) < 0.00001) return;
+  state.world.offsetX = screenX - (screenX - state.world.offsetX) * (nextScale / oldScale);
+  state.world.offsetY = screenY - (screenY - state.world.offsetY) * (nextScale / oldScale);
+  state.world.scale = nextScale;
+  state.world.centered = true;
+  drawWorldMap();
+}
+
+function centerWorldOnBlock(blockX, blockZ, scale) {
+  const canvas = $("world-canvas");
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  if (scale) state.world.scale = normalizeWorldScale(scale);
+  state.world.offsetX = rect.width / 2 - Number(blockX || 0) * state.world.scale;
+  state.world.offsetY = rect.height / 2 - Number(blockZ || 0) * state.world.scale;
+  state.world.centered = true;
+  drawWorldMap();
+}
+
+function fitWorldToView(width, height, data) {
+  if (!data?.chunks?.length) return;
+  const minBlockX = data.bounds.minX * 16;
+  const maxBlockX = (data.bounds.maxX + 1) * 16;
+  const minBlockZ = data.bounds.minZ * 16;
+  const maxBlockZ = (data.bounds.maxZ + 1) * 16;
+  const spanX = Math.max(16, maxBlockX - minBlockX);
+  const spanZ = Math.max(16, maxBlockZ - minBlockZ);
+  const fitScale = normalizeWorldScale(Math.min((width * 0.86) / spanX, (height * 0.86) / spanZ));
+  state.world.scale = fitScale;
+  state.world.offsetX = (width - spanX * fitScale) / 2 - minBlockX * fitScale;
+  state.world.offsetY = (height - spanZ * fitScale) / 2 - minBlockZ * fitScale;
+  state.world.centered = true;
+}
+
+async function loadWorldMap(resetView) {
+  const canvas = $("world-canvas");
+  const legend = $("world-legend");
+  const token = ++state.world.loadToken;
+  const requestServerId = selectedServerIdForApi();
+  const requestDimension = state.world.dimension;
+  const requestLimit = state.world.limit;
+  if (legend) legend.innerHTML = `<b>Loading world...</b><div class="muted">Scanning region files.</div>`;
+  resetWorldRenderCaches();
+  if (canvas) {
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  try {
+    const data = await api("/api/world/map?" + q({ serverId: requestServerId, dimension: requestDimension, limit: requestLimit }));
+    if (token !== state.world.loadToken || requestServerId !== selectedServerIdForApi() || requestDimension !== state.world.dimension || requestLimit !== state.world.limit) return;
+    state.world.data = data;
+    state.world.dimension = state.world.data.dimension || state.world.dimension;
+    if (resetView) state.world.centered = false;
+    const select = $("world-dimension");
+    if (select) select.innerHTML = worldDimensionOptions(state.world.data);
+    if (legend) legend.innerHTML = worldLegendHtml(state.world.data);
+    drawWorldMap();
+    if (state.world.pendingJump && normalizeWorldDimension(state.world.pendingJump.dimension) === state.world.dimension) {
+      const jump = state.world.pendingJump;
+      state.world.pendingJump = null;
+      centerWorldOnBlock(jump.x, jump.z, jump.scale);
+    }
+    loadWorldPlayers();
+    return data;
+  } catch (error) {
+    if (token !== state.world.loadToken) return;
+    if (legend) legend.innerHTML = `<b>World map failed</b><div class="muted">${esc(error.message)}</div>`;
+    notice(error.message, true);
+  }
+}
+
+function drawWorldMap() {
+  const canvas = $("world-canvas");
+  if (!canvas) return;
+  const data = state.world.data;
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.floor(rect.width));
+  const height = Math.max(1, Math.floor(rect.height));
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#050608";
+  ctx.fillRect(0, 0, width, height);
+  $("world-zoom-label").textContent = worldZoomLabel();
+  updateWorldCoordinates();
+  const legend = $("world-legend");
+  if (legend) legend.innerHTML = worldLegendHtml(data);
+  if (!data || !data.chunks || !data.chunks.length) {
+    ctx.fillStyle = "#b8b4aa";
+    ctx.font = "14px system-ui";
+    ctx.fillText("No generated chunks to draw.", 18, 28);
+    return;
+  }
+  let scale = state.world.scale;
+  const minBlockX = data.bounds.minX * 16;
+  const maxBlockX = (data.bounds.maxX + 1) * 16;
+  const minBlockZ = data.bounds.minZ * 16;
+  const maxBlockZ = (data.bounds.maxZ + 1) * 16;
+  if (!state.world.centered) {
+    fitWorldToView(width, height, data);
+    scale = state.world.scale;
+  }
+  if (isWorldOverview(data)) {
+    drawVisibleWorldDetails(ctx, width, height, data);
+    drawWorldDetailStatus(ctx, width, height);
+    drawWorldPlayers(ctx);
+    drawWorldTrimOverlay(ctx);
+    drawWorldCoordinates(ctx, minBlockX, maxBlockX, minBlockZ, maxBlockZ);
+    queueVisibleWorldDetails(width, height);
+    return;
+  }
+  for (const chunk of data.chunks) {
+    const baseX = chunk.x * 16 * scale + state.world.offsetX;
+    const baseY = chunk.z * 16 * scale + state.world.offsetY;
+    if (baseX > width || baseY > height || baseX + 16 * scale < 0 || baseY + 16 * scale < 0) continue;
+    if (chunk.pixels?.length) {
+      drawWorldChunkPixels(ctx, chunk);
+    } else {
+      ctx.fillStyle = chunk.color || chunk.pixels?.[136] || chunk.pixels?.[0] || "#4f8a3d";
+      ctx.fillRect(Math.floor(baseX), Math.floor(baseY), Math.max(1, Math.ceil(16 * scale)), Math.max(1, Math.ceil(16 * scale)));
+    }
+    if (scale >= 4) {
+      ctx.strokeStyle = "rgba(0,0,0,.22)";
+      ctx.strokeRect(Math.floor(baseX), Math.floor(baseY), 16 * scale, 16 * scale);
+    }
+  }
+  drawVisibleWorldDetails(ctx, width, height, data);
+  drawWorldDetailStatus(ctx, width, height);
+  drawWorldPlayers(ctx);
+  drawWorldTrimOverlay(ctx);
+  drawWorldCoordinates(ctx, minBlockX, maxBlockX, minBlockZ, maxBlockZ);
+  queueVisibleWorldDetails(width, height);
+}
+
+function isWorldOverview(data) {
+  return data?.mode === "overview" || data?.chunks?.some(chunk => !chunk.pixels?.length);
+}
+
+function drawWorldOverview(ctx, width, height, data, scale) {
+  const bitmap = ensureWorldOverviewBitmap(data);
+  if (!bitmap) return;
+  if (bitmap.canvas) {
+    ctx.imageSmoothingEnabled = false;
+    const destX = data.bounds.minX * 16 * scale + state.world.offsetX;
+    const destY = data.bounds.minZ * 16 * scale + state.world.offsetY;
+    const destW = bitmap.width * 16 * scale;
+    const destH = bitmap.height * 16 * scale;
+    ctx.drawImage(bitmap.canvas, 0, 0, bitmap.width, bitmap.height, destX, destY, destW, destH);
+    return;
+  }
+  const chunks = bitmap.index ? visibleWorldOverviewChunks(bitmap, width, height, scale) : data.chunks;
+  for (const chunk of chunks) {
+    const baseX = chunk.x * 16 * scale + state.world.offsetX;
+    const baseY = chunk.z * 16 * scale + state.world.offsetY;
+    if (baseX > width || baseY > height || baseX + 16 * scale < 0 || baseY + 16 * scale < 0) continue;
+    ctx.fillStyle = chunk.color || "#4f8a3d";
+    ctx.fillRect(Math.floor(baseX), Math.floor(baseY), Math.ceil(16 * scale), Math.ceil(16 * scale));
+  }
+}
+
+function worldChunkKey(x, z) {
+  return `${x}:${z}`;
+}
+
+function worldChunkBitmap(chunk) {
+  if (!chunk?.pixels?.length) return null;
+  if (chunk._bitmap) return chunk._bitmap;
+  const canvas = document.createElement("canvas");
+  canvas.width = 16;
+  canvas.height = 16;
+  const ctx = canvas.getContext("2d");
+  const image = ctx.createImageData(16, 16);
+  for (let i = 0; i < 256; i++) {
+    const color = hexToRgb(chunk.pixels[i] || chunk.color || "#4f8a3d");
+    image.data[i * 4] = color.r;
+    image.data[i * 4 + 1] = color.g;
+    image.data[i * 4 + 2] = color.b;
+    image.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(image, 0, 0);
+  chunk._bitmap = canvas;
+  return canvas;
+}
+
+function drawWorldChunkPixels(ctx, chunk) {
+  if (!chunk?.pixels?.length) return false;
+  const scale = state.world.scale;
+  const baseX = chunk.x * 16 * scale + state.world.offsetX;
+  const baseY = chunk.z * 16 * scale + state.world.offsetY;
+  if (scale < 1) {
+    const bitmap = worldChunkBitmap(chunk);
+    if (!bitmap) return false;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(bitmap, baseX, baseY, 16 * scale, 16 * scale);
+    return true;
+  }
+  for (let z = 0; z < 16; z++) {
+    for (let x = 0; x < 16; x++) {
+      ctx.fillStyle = chunk.pixels[z * 16 + x] || chunk.color || "#4f8a3d";
+      ctx.fillRect(Math.floor(baseX + x * scale), Math.floor(baseY + z * scale), Math.ceil(scale), Math.ceil(scale));
+    }
+  }
+  return true;
+}
+
+function drawVisibleWorldDetails(ctx, width, height, data) {
+  if (!state.world.detailCache?.size) return;
+  const bounds = worldClipChunkBounds(worldVisibleChunkBounds(width, height, 1), data);
+  if (!bounds) return;
+  for (const detail of state.world.detailCache.values()) {
+    if (detail.x < bounds.minX || detail.x > bounds.maxX || detail.z < bounds.minZ || detail.z > bounds.maxZ) continue;
+    drawWorldChunkPixels(ctx, detail);
+  }
+  const chunkPixels = 16 * state.world.scale;
+  if (chunkPixels >= 20) {
+    ctx.strokeStyle = "rgba(0,0,0,.28)";
+    ctx.lineWidth = 1;
+    for (let z = bounds.minZ; z <= bounds.maxZ; z++) {
+      for (let x = bounds.minX; x <= bounds.maxX; x++) {
+        const sx = x * 16 * state.world.scale + state.world.offsetX;
+        const sy = z * 16 * state.world.scale + state.world.offsetY;
+        ctx.strokeRect(Math.floor(sx), Math.floor(sy), chunkPixels, chunkPixels);
+      }
+    }
+  }
+}
+
+function drawWorldDetailStatus(ctx, width, height) {
+  const progress = worldVisibleDetailProgress(width, height);
+  if (!progress.total || (progress.loaded >= progress.total && !progress.inflight)) return;
+  const text = progress.loaded || progress.inflight
+    ? `Loading full detail center-out: ${formatDownloads(progress.loaded)} / ${formatDownloads(progress.total)} tiles`
+    : "Starting full detail from the map center...";
+  ctx.save();
+  ctx.fillStyle = "rgba(5,6,8,.78)";
+  ctx.strokeStyle = "rgba(255,255,255,.12)";
+  ctx.lineWidth = 1;
+  const boxW = Math.min(Math.max(220, width - 32), 460);
+  ctx.fillRect(16, 42, boxW, 42);
+  ctx.strokeRect(16, 42, boxW, 42);
+  ctx.fillStyle = "#f6f3ec";
+  ctx.font = "700 13px system-ui";
+  ctx.fillText(text, 28, 68);
+  ctx.restore();
+}
+
+function worldVisibleChunkBounds(width, height, pad = 0) {
+  const chunkPixels = 16 * state.world.scale;
+  return {
+    minX: Math.floor((0 - state.world.offsetX) / chunkPixels) - pad,
+    maxX: Math.ceil((width - state.world.offsetX) / chunkPixels) + pad,
+    minZ: Math.floor((0 - state.world.offsetY) / chunkPixels) - pad,
+    maxZ: Math.ceil((height - state.world.offsetY) / chunkPixels) + pad
+  };
+}
+
+function worldClipChunkBounds(bounds, data) {
+  if (!bounds || !data?.bounds) return null;
+  const clipped = {
+    minX: Math.max(bounds.minX, data.bounds.minX),
+    maxX: Math.min(bounds.maxX, data.bounds.maxX),
+    minZ: Math.max(bounds.minZ, data.bounds.minZ),
+    maxZ: Math.min(bounds.maxZ, data.bounds.maxZ)
+  };
+  return clipped.minX <= clipped.maxX && clipped.minZ <= clipped.maxZ ? clipped : null;
+}
+
+function worldTileKey(tileX, tileZ) {
+  return `${tileX}:${tileZ}`;
+}
+
+function worldVisibleCenterChunk(width, height) {
+  const chunkPixels = 16 * state.world.scale;
+  return {
+    x: Math.floor(((width / 2) - state.world.offsetX) / chunkPixels),
+    z: Math.floor(((height / 2) - state.world.offsetY) / chunkPixels)
+  };
+}
+
+function worldTileBounds(tileX, tileZ, visibleBounds) {
+  const minX = tileX * WORLD_DETAIL_TILE_CHUNKS;
+  const minZ = tileZ * WORLD_DETAIL_TILE_CHUNKS;
+  const bounds = {
+    minX: Math.max(minX, visibleBounds.minX),
+    maxX: Math.min(minX + WORLD_DETAIL_TILE_CHUNKS - 1, visibleBounds.maxX),
+    minZ: Math.max(minZ, visibleBounds.minZ),
+    maxZ: Math.min(minZ + WORLD_DETAIL_TILE_CHUNKS - 1, visibleBounds.maxZ)
+  };
+  bounds.limit = Math.min(WORLD_DETAIL_LIMIT, Math.max(1, bounds.maxX - bounds.minX + 1) * Math.max(1, bounds.maxZ - bounds.minZ + 1));
+  return bounds;
+}
+
+function worldVisibleDetailPlan(width, height) {
+  const data = state.world.data;
+  const visibleBounds = worldClipChunkBounds(worldVisibleChunkBounds(width, height, 1), data);
+  if (!visibleBounds) return { bounds: null, tiles: [] };
+  const center = worldVisibleCenterChunk(width, height);
+  const centerTileX = Math.floor(center.x / WORLD_DETAIL_TILE_CHUNKS);
+  const centerTileZ = Math.floor(center.z / WORLD_DETAIL_TILE_CHUNKS);
+  const minTileX = Math.floor(visibleBounds.minX / WORLD_DETAIL_TILE_CHUNKS);
+  const maxTileX = Math.floor(visibleBounds.maxX / WORLD_DETAIL_TILE_CHUNKS);
+  const minTileZ = Math.floor(visibleBounds.minZ / WORLD_DETAIL_TILE_CHUNKS);
+  const maxTileZ = Math.floor(visibleBounds.maxZ / WORLD_DETAIL_TILE_CHUNKS);
+  const tiles = [];
+  for (let tileZ = minTileZ; tileZ <= maxTileZ; tileZ++) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX++) {
+      const dx = Math.abs(tileX - centerTileX);
+      const dz = Math.abs(tileZ - centerTileZ);
+      tiles.push({
+        key: worldTileKey(tileX, tileZ),
+        tileX,
+        tileZ,
+        bounds: worldTileBounds(tileX, tileZ, visibleBounds),
+        ring: Math.max(dx, dz),
+        distance: dx * dx + dz * dz
+      });
+    }
+  }
+  tiles.sort((a, b) => a.ring - b.ring || a.distance - b.distance || a.tileZ - b.tileZ || a.tileX - b.tileX);
+  return { bounds: visibleBounds, tiles };
+}
+
+function worldVisibleDetailProgress(width, height) {
+  const plan = worldVisibleDetailPlan(width, height);
+  let loaded = 0;
+  let inflight = 0;
+  let failed = 0;
+  for (const tile of plan.tiles) {
+    if (state.world.detailLoadedTiles?.has(tile.key)) loaded++;
+    if (state.world.detailInflightTiles?.has(tile.key)) inflight++;
+    if (state.world.detailFailedTiles?.has(tile.key)) failed++;
+  }
+  return { total: plan.tiles.length, loaded, inflight, failed };
+}
+
+function queueVisibleWorldDetails(width, height) {
+  if (!state.world.data?.chunks?.length) return;
+  const plan = worldVisibleDetailPlan(width, height);
+  if (!plan.tiles.length) return;
+  let slots = Math.max(0, WORLD_DETAIL_CONCURRENCY - (state.world.detailInflightTiles?.size || 0));
+  if (!slots) return;
+  const now = Date.now();
+  for (const tile of plan.tiles) {
+    if (state.world.detailLoadedTiles?.has(tile.key) || state.world.detailInflightTiles?.has(tile.key)) continue;
+    const failedAt = state.world.detailFailedTiles?.get(tile.key);
+    if (failedAt && now - failedAt < WORLD_DETAIL_RETRY_MS) continue;
+    loadWorldDetailTile(tile);
+    slots--;
+    if (!slots) break;
+  }
+}
+
+async function loadWorldDetailTile(tile) {
+  const token = state.world.detailToken;
+  const requestServerId = selectedServerIdForApi();
+  const requestDimension = state.world.dimension;
+  state.world.detailInflightTiles.add(tile.key);
+  state.world.detailFailedTiles.delete(tile.key);
+  try {
+    const detail = await api("/api/world/map?" + q({
+      serverId: requestServerId,
+      dimension: requestDimension,
+      detail: "1",
+      limit: tile.bounds.limit,
+      minX: tile.bounds.minX,
+      maxX: tile.bounds.maxX,
+      minZ: tile.bounds.minZ,
+      maxZ: tile.bounds.maxZ
+    }));
+    if (token !== state.world.detailToken || requestServerId !== selectedServerIdForApi() || requestDimension !== state.world.dimension) return;
+    for (const chunk of detail.chunks || []) {
+      if (chunk.pixels?.length) state.world.detailCache.set(worldChunkKey(chunk.x, chunk.z), chunk);
+    }
+    state.world.detailLoadedTiles.add(tile.key);
+  } catch (error) {
+    if (token === state.world.detailToken) state.world.detailFailedTiles.set(tile.key, Date.now());
+  } finally {
+    if (token === state.world.detailToken) {
+      state.world.detailInflightTiles.delete(tile.key);
+      window.clearTimeout(state.world.detailTimer);
+      state.world.detailTimer = window.setTimeout(() => {
+        if (state.page === "world") drawWorldMap();
+      }, 40);
+    }
+  }
+}
+
+function drawWorldPlayers(ctx) {
+  const players = (state.world.players || []).filter(player => player.available !== false && normalizeWorldDimension(player.dimension) === state.world.dimension);
+  if (!players.length) return;
+  const scale = state.world.scale;
+  for (const player of players) {
+    const x = Number(player.x) * scale + state.world.offsetX;
+    const y = Number(player.z) * scale + state.world.offsetY;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = "#2f8cff";
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, -13);
+    ctx.lineTo(5, -4);
+    ctx.lineTo(-5, -4);
+    ctx.closePath();
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 12px system-ui";
+    ctx.shadowColor = "rgba(0,0,0,.8)";
+    ctx.shadowBlur = 4;
+    ctx.fillText(player.name || "Player", 10, -10);
+    ctx.restore();
+  }
+}
+
+function ensureWorldOverviewBitmap(data) {
+  if (!data?.chunks?.length) return null;
+  const width = data.bounds.maxX - data.bounds.minX + 1;
+  const height = data.bounds.maxZ - data.bounds.minZ + 1;
+  const key = [data.serverId, data.dimension, data.limit, data.mode, data.chunks.length, data.bounds.minX, data.bounds.maxX, data.bounds.minZ, data.bounds.maxZ].join(":");
+  if (state.world.bitmap?.key === key) return state.world.bitmap;
+  if (width <= 0 || height <= 0 || width > 8192 || height > 8192 || width * height > 12000000) {
+    state.world.bitmap = { key, sparse: true, index: buildWorldChunkIndex(data.chunks) };
+    return state.world.bitmap;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  const image = ctx.createImageData(width, height);
+  for (const chunk of data.chunks) {
+    const x = chunk.x - data.bounds.minX;
+    const z = chunk.z - data.bounds.minZ;
+    if (x < 0 || z < 0 || x >= width || z >= height) continue;
+    const color = hexToRgb(chunk.color || "#4f8a3d");
+    const offset = (z * width + x) * 4;
+    image.data[offset] = color.r;
+    image.data[offset + 1] = color.g;
+    image.data[offset + 2] = color.b;
+    image.data[offset + 3] = 255;
+  }
+  ctx.putImageData(image, 0, 0);
+  state.world.bitmap = { key, canvas, width, height };
+  return state.world.bitmap;
+}
+
+function buildWorldChunkIndex(chunks) {
+  const tileSize = 64;
+  const tiles = new Map();
+  for (const chunk of chunks || []) {
+    const key = Math.floor(chunk.x / tileSize) + ":" + Math.floor(chunk.z / tileSize);
+    if (!tiles.has(key)) tiles.set(key, []);
+    tiles.get(key).push(chunk);
+  }
+  return { tileSize, tiles };
+}
+
+function visibleWorldOverviewChunks(bitmap, width, height, scale) {
+  const index = bitmap.index;
+  if (!index) return [];
+  const chunkPixels = 16 * scale;
+  const minX = Math.floor((0 - state.world.offsetX) / chunkPixels) - 1;
+  const maxX = Math.ceil((width - state.world.offsetX) / chunkPixels) + 1;
+  const minZ = Math.floor((0 - state.world.offsetY) / chunkPixels) - 1;
+  const maxZ = Math.ceil((height - state.world.offsetY) / chunkPixels) + 1;
+  const minTileX = Math.floor(minX / index.tileSize);
+  const maxTileX = Math.floor(maxX / index.tileSize);
+  const minTileZ = Math.floor(minZ / index.tileSize);
+  const maxTileZ = Math.floor(maxZ / index.tileSize);
+  const chunks = [];
+  for (let tileZ = minTileZ; tileZ <= maxTileZ; tileZ++) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX++) {
+      for (const chunk of index.tiles.get(tileX + ":" + tileZ) || []) {
+        if (chunk.x >= minX && chunk.x <= maxX && chunk.z >= minZ && chunk.z <= maxZ) chunks.push(chunk);
+      }
+    }
+  }
+  return chunks;
+}
+
+function hexToRgb(hex) {
+  const value = String(hex || "").replace("#", "");
+  const parsed = /^[0-9a-fA-F]{6}$/.test(value) ? parseInt(value, 16) : 0x4f8a3d;
+  return { r: (parsed >> 16) & 255, g: (parsed >> 8) & 255, b: parsed & 255 };
+}
+
+function normalizeWorldDimension(value) {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("the_nether") || text.includes("nether")) return "nether";
+  if (text.includes("the_end") || text === "end") return "end";
+  if (text.includes("overworld")) return "overworld";
+  return text || state.world.dimension;
+}
+
+async function loadWorldPlayers(force = false) {
+  if (state.page !== "world") return;
+  if (state.world.playersLoading && !force) return;
+  const token = ++state.world.playersToken;
+  state.world.playersLoading = true;
+  updateWorldPlayerPanel();
+  try {
+    const data = await api("/api/world/players?" + q({ serverId: selectedServerIdForApi(), refresh: force ? "1" : "0" }));
+    if (token !== state.world.playersToken) return;
+    state.world.players = (data.players || []).map(player => ({ ...player, dimension: normalizeWorldDimension(player.dimension) }));
+  } catch (error) {
+    if (force) notice(error.message, true);
+  } finally {
+    if (token === state.world.playersToken) {
+      state.world.playersLoading = false;
+      updateWorldPlayerPanel();
+      drawWorldMap();
+    }
+  }
+}
+
+function updateWorldPlayerPanel() {
+  const panel = $("world-player-panel");
+  if (panel) panel.innerHTML = worldPlayerPanelHtml();
+  const refresh = $("world-players-refresh");
+  if (refresh) refresh.onclick = () => loadWorldPlayers(true);
+  document.querySelectorAll("[data-world-player-jump]").forEach(button => {
+    button.onclick = () => jumpToWorldPlayer(button.dataset.worldPlayerJump);
+  });
+}
+
+function jumpToWorldPlayer(name) {
+  const player = (state.world.players || []).find(item => item.name === name);
+  if (!player || player.available === false) return;
+  const targetDimension = normalizeWorldDimension(player.dimension);
+  const jump = () => centerWorldOnBlock(Number(player.x), Number(player.z), Math.max(state.world.scale, 1.8));
+  if (targetDimension && targetDimension !== state.world.dimension) {
+    state.world.pendingJump = { dimension: targetDimension, x: Number(player.x), z: Number(player.z), scale: Math.max(state.world.scale, 1.8) };
+    state.world.dimension = targetDimension;
+    state.world.data = null;
+    resetWorldRenderCaches();
+    state.world.centered = false;
+    renderWorld();
+    return;
+  }
+  jump();
+}
+
+function drawWorldCoordinates(ctx, minBlockX, maxBlockX, minBlockZ, maxBlockZ) {
+  const canvas = $("world-canvas");
+  const rect = canvas?.getBoundingClientRect();
+  const width = rect?.width || 0;
+  const height = rect?.height || 0;
+  const originX = state.world.offsetX;
+  const originY = state.world.offsetY;
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,.34)";
+  ctx.lineWidth = 1;
+  if (originX >= 0 && originX <= width) {
+    ctx.beginPath();
+    ctx.moveTo(Math.floor(originX) + 0.5, 0);
+    ctx.lineTo(Math.floor(originX) + 0.5, height);
+    ctx.stroke();
+  }
+  if (originY >= 0 && originY <= height) {
+    ctx.beginPath();
+    ctx.moveTo(0, Math.floor(originY) + 0.5);
+    ctx.lineTo(width, Math.floor(originY) + 0.5);
+    ctx.stroke();
+  }
+  if (originX >= 0 && originX <= width && originY >= 0 && originY <= height) {
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 12px system-ui";
+    ctx.fillText("0,0", originX + 8, originY - 8);
+  }
+  ctx.restore();
+  ctx.fillStyle = "rgba(246,243,236,.78)";
+  ctx.font = "12px system-ui";
+  ctx.fillText("x " + minBlockX + "..." + (maxBlockX - 1) + " / z " + minBlockZ + "..." + (maxBlockZ - 1), 12, 20);
+}
+
+function drawWorldTrimOverlay(ctx) {
+  const areas = [...state.world.trimAreas];
+  if (state.world.trimDraft) areas.push(state.world.trimDraft);
+  areas.forEach((area, index) => {
+    const rect = trimAreaScreenRect(area);
+    ctx.fillStyle = index === areas.length - 1 && state.world.trimDraft ? "rgba(75,156,255,.18)" : "rgba(13,181,13,.16)";
+    ctx.strokeStyle = index === areas.length - 1 && state.world.trimDraft ? "rgba(75,156,255,.95)" : "rgba(13,181,13,.95)";
+    ctx.lineWidth = 2;
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.fillStyle = "#fff";
+    ctx.font = "12px system-ui";
+    ctx.fillText(index === areas.length - 1 && state.world.trimDraft ? "Keep preview" : `Keep ${index + 1}`, rect.x + 6, rect.y + 18);
+  });
+}
+
+function trimAreaScreenRect(area) {
+  const scale = state.world.scale;
+  const x = area.minChunkX * 16 * scale + state.world.offsetX;
+  const y = area.minChunkZ * 16 * scale + state.world.offsetY;
+  const w = (area.maxChunkX - area.minChunkX + 1) * 16 * scale;
+  const h = (area.maxChunkZ - area.minChunkZ + 1) * 16 * scale;
+  return { x, y, w, h };
+}
+
+function trimAreaLabel(area) {
+  const minBlockX = area.minChunkX * 16;
+  const maxBlockX = (area.maxChunkX + 1) * 16 - 1;
+  const minBlockZ = area.minChunkZ * 16;
+  const maxBlockZ = (area.maxChunkZ + 1) * 16 - 1;
+  const chunks = (area.maxChunkX - area.minChunkX + 1) * (area.maxChunkZ - area.minChunkZ + 1);
+  return `x ${minBlockX}..${maxBlockX}, z ${minBlockZ}..${maxBlockZ} / ${chunks} chunks`;
+}
+
+function worldSelectedGeneratedCount(data) {
+  if (!data?.chunks?.length || !state.world.trimAreas.length) return 0;
+  return data.chunks.filter(chunk => state.world.trimAreas.some(area => chunk.x >= area.minChunkX && chunk.x <= area.maxChunkX && chunk.z >= area.minChunkZ && chunk.z <= area.maxChunkZ)).length;
+}
+
+async function applyWorldTrim(button) {
+  if (!state.world.trimAreas.length) return;
+  const count = state.world.trimAreas.length;
+  const generated = worldSelectedGeneratedCount(state.world.data);
+  const message = `Keep ${count} selected area${count === 1 ? "" : "s"} in ${state.world.dimension} and delete all generated chunks outside them? MineMux will create a backup first.${generated ? ` ${generated} visible generated chunks are inside the selection.` : ""}`;
+  if (!confirm(message)) return;
+  try {
+    const result = await run(button, () => post("/api/world/trim?" + q({ serverId: selectedServerIdForApi() }), {
+      dimension: state.world.dimension,
+      areas: state.world.trimAreas
+    }));
+    state.world.trimAreas = [];
+    state.world.trimDraft = null;
+    state.world.trimAnchor = null;
+    state.world.trimMode = false;
+    notice(`Trimmed ${result.deletedChunks || 0} chunks. Backup: ${result.backupId || "created"}`);
+    await loadWorldMap(true);
+    await refresh(false);
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+async function loadFiles(shouldRender = true) {
+  const data = await api("/api/server/files?" + q({ path: state.filePath, serverId: selectedServerIdForApi() }));
+  state.files = data.files || [];
+  if (shouldRender) render();
+}
+
+function renderFiles() {
+  $("content").innerHTML = `<div class="cols">
+    <div class="card">
+      <div class="section-head">
+        <div><h2>Files</h2><p class="muted">${esc(state.filePath || "Server root")}</p></div>
+        <div class="row"><button id="file-up" ${state.filePath ? "" : "disabled"}>Up</button><button id="file-upload">Upload Files</button><button id="folder-upload">Upload Folder</button></div>
+      </div>
+      ${fileBreadcrumbHtml()}
+      <div class="drop-zone" style="margin-bottom:12px">
+        <b>${fileSummaryHtml()}</b>
+        <div class="muted">Use Upload Folder to preserve subfolders inside the current location.</div>
+      </div>
+      <div class="list" id="files-list">${filesListHtml()}</div>
+    </div>
+    <div id="file-editor-panel">${fileEditorHtml()}</div>
+  </div>`;
+  $("file-up").onclick = async () => { state.filePath = state.filePath.split("/").slice(0, -1).join("/"); state.fileEditor = null; await loadFiles(); };
+  $("file-upload").onclick = () => $("server-upload").click();
+  $("folder-upload").onclick = () => $("server-folder-upload").click();
+  wireFileButtons();
+  wireFileEditor();
+}
+
+function fileSummaryHtml() {
+  const folders = state.files.filter(file => file.directory).length;
+  const files = state.files.length - folders;
+  const total = state.files.reduce((sum, file) => sum + Number(file.sizeBytes || 0), 0);
+  return `${files} files, ${folders} folders, ${bytes(total)}`;
+}
+
+function filesListHtml() {
+  return state.files.map(fileRow).join("") || emptyState("This folder is empty", "Upload a file here or move up to another folder.");
+}
+
+function fileBreadcrumbHtml() {
+  const parts = state.filePath ? state.filePath.split("/").filter(Boolean) : [];
+  let path = "";
+  const buttons = [`<button data-file-path="">Root</button>`].concat(parts.map(part => {
+    path = path ? `${path}/${part}` : part;
+    return `<button data-file-path="${esc(path)}">${esc(part)}</button>`;
+  }));
+  return `<div class="file-breadcrumb">${buttons.join("<span class=\"dim\">/</span>")}</div>`;
+}
+
+function updateFilesListOnly() {
+  const target = $("files-list");
+  if (target) {
+    const next = filesListHtml();
+    if (target.innerHTML !== next) target.innerHTML = next;
+    wireFileButtons();
+  }
+}
+
+function fileRow(file) {
+  const type = file.directory ? "Folder" : bytes(file.sizeBytes);
+  return `<div class="item between"><div><span class="file-type">${file.directory ? "DIR" : "FILE"}</span><b style="display:block;margin-top:3px">${esc(file.name)}</b><div class="muted">${type}</div></div><div class="row">${file.directory ? `<button data-open="${esc(file.path)}">Open</button>` : `<button data-edit-file="${esc(file.path)}">Edit</button>`}<a href="/api/server/file?${q({ path: file.path, serverId: selectedServerIdForApi() })}"><button>Download</button></a><button data-delete-file="${esc(file.path)}" class="danger">Delete</button></div></div>`;
+}
+
+function wireFileButtons() {
+  document.querySelectorAll("[data-file-path]").forEach(b => b.onclick = async () => { state.filePath = b.dataset.filePath; state.fileEditor = null; await loadFiles(); });
+  document.querySelectorAll("[data-open]").forEach(b => b.onclick = async () => { state.filePath = b.dataset.open; state.fileEditor = null; await loadFiles(); });
+  document.querySelectorAll("[data-edit-file]").forEach(b => b.onclick = () => openFileEditor(b.dataset.editFile));
+  document.querySelectorAll("[data-delete-file]").forEach(b => b.onclick = async () => { if (confirm("Delete file/folder?")) { await del("/api/server/file?" + q({ path: b.dataset.deleteFile, serverId: selectedServerIdForApi() })); if (state.fileEditor?.path === b.dataset.deleteFile) state.fileEditor = null; await loadFiles(); } });
+}
+
+async function openFileEditor(path) {
+  try {
+    const data = await api("/api/server/file?" + q({ path, raw: "1", serverId: selectedServerIdForApi() }));
+    state.fileEditor = { path, content: data.content || "" };
+    const panel = $("file-editor-panel");
+    if (panel) {
+      panel.innerHTML = fileEditorHtml();
+      wireFileEditor();
+    }
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+function fileEditorHtml() {
+  if (!state.fileEditor) return `<div class="card"><h2>Editor</h2><p class="muted">Select a text file to edit it live.</p></div>`;
+  return `<div class="card"><div class="between"><h2>Edit File</h2><button id="close-editor">Close</button></div><p class="muted">${esc(state.fileEditor.path)}</p><textarea id="file-editor-text" spellcheck="false">${esc(state.fileEditor.content)}</textarea><div class="row" style="margin-top:12px"><button class="primary" id="save-editor">Save</button><button id="reload-editor">Reload</button></div></div>`;
+}
+
+function wireFileEditor() {
+  const close = $("close-editor");
+  if (close) close.onclick = () => { state.fileEditor = null; $("file-editor-panel").innerHTML = fileEditorHtml(); };
+  const save = $("save-editor");
+  if (save) save.onclick = async () => {
+    const content = $("file-editor-text").value;
+    await run(save, () => api("/api/server/file?" + q({ path: state.fileEditor.path, serverId: selectedServerIdForApi() }), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }) }));
+    state.fileEditor.content = content;
+    notice("File saved");
+  };
+  const reload = $("reload-editor");
+  if (reload) reload.onclick = () => openFileEditor(state.fileEditor.path);
+}
+
+function renderSettings() {
+  const profile = state.status?.profile || {};
+  $("content").innerHTML = `<div class="grid"><div class="card"><h2>Preferences</h2><label class="row"><input id="set-autostart" type="checkbox" style="width:auto" ${profile.features?.autoStart ? "checked" : ""}> Start active server on phone boot</label><label class="row"><input id="set-restart" type="checkbox" style="width:auto" ${profile.features?.restartOnCrash !== false ? "checked" : ""}> Auto-restart on crash</label></div><div class="card"><h2>Advanced</h2><div class="row"><button onclick="location.href='/'">Web UI</button><button id="refresh-settings">Refresh</button></div></div></div>`;
+  $("set-autostart").onchange = e => post("/api/config", { autoStart: e.target.checked }).then(refresh).catch(err => notice(err.message, true));
+  $("set-restart").onchange = e => post("/api/config", { restartOnCrash: e.target.checked }).then(refresh).catch(err => notice(err.message, true));
+  $("refresh-settings").onclick = refresh;
+}
+
+async function renderTermux() {
+  $("content").innerHTML = `<div class="grid">
+    <div class="card">
+      <div class="section-head">
+        <div><h2>Termux Shell</h2><p class="muted" id="termux-info">Loading shell info...</p></div>
+        <button id="termux-clear">Clear</button>
+      </div>
+      <div class="console terminal-output" id="termux-output">${esc(state.termux.output || "Run a command to see output here.")}</div>
+      <div class="row" style="margin-top:12px">
+        <input id="termux-cwd" style="max-width:320px" placeholder="Working directory">
+        <input id="termux-command" class="grow" placeholder="pkg list-installed | head">
+        <button class="primary" id="termux-run">Run</button>
+      </div>
+    </div>
+  </div>`;
+  try {
+    state.termux.info = state.termux.info || await api("/api/termux/info");
+    state.termux.cwd = state.termux.cwd || state.termux.info.cwd || state.termux.info.home || "";
+    setText("termux-info", `${state.termux.info.shell || "sh"} / ${state.termux.cwd}`);
+    $("termux-cwd").value = state.termux.cwd;
+  } catch (error) {
+    setText("termux-info", error.message);
+  }
+  $("termux-clear").onclick = () => { state.termux.output = ""; $("termux-output").textContent = "Cleared."; };
+  $("termux-run").onclick = () => runTermuxCommand();
+  $("termux-command").onkeydown = event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runTermuxCommand();
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!state.termux.history.length) return;
+      if (state.termux.historyIndex < 0) state.termux.historyIndex = state.termux.history.length;
+      state.termux.historyIndex = Math.max(0, state.termux.historyIndex - 1);
+      $("termux-command").value = state.termux.history[state.termux.historyIndex] || "";
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (!state.termux.history.length) return;
+      state.termux.historyIndex = Math.min(state.termux.history.length, state.termux.historyIndex + 1);
+      $("termux-command").value = state.termux.history[state.termux.historyIndex] || "";
+    }
+  };
+}
+
+async function runTermuxCommand() {
+  const input = $("termux-command");
+  const button = $("termux-run");
+  const command = input.value.trim();
+  if (!command) return;
+  const cwd = $("termux-cwd").value.trim();
+  state.termux.cwd = cwd;
+  if (state.termux.history[state.termux.history.length - 1] !== command) {
+    state.termux.history.push(command);
+    if (state.termux.history.length > 50) state.termux.history.shift();
+  }
+  state.termux.historyIndex = state.termux.history.length;
+  button.disabled = true;
+  const started = new Date().toLocaleTimeString();
+  state.termux.output += `\n$ ${command}\n`;
+  $("termux-output").textContent = state.termux.output;
+  try {
+    const res = await post("/api/termux/command", { command, cwd, timeoutSeconds: 60 });
+    state.termux.output += `${res.stdout || ""}${res.stderr || ""}\n[exit ${res.exitCode} / ${res.durationMs}ms / ${started}]\n`;
+    $("termux-output").textContent = state.termux.output;
+    $("termux-output").scrollTop = $("termux-output").scrollHeight;
+    input.value = "";
+  } catch (error) {
+    state.termux.output += `Error: ${error.message}\n`;
+    $("termux-output").textContent = state.termux.output;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderConsole() {
+  $("content").innerHTML = `<div class="card"><h2>Live Console</h2><div class="console" id="console">Loading logs...</div><div class="row" style="margin-top:12px"><input id="console-command" class="grow" placeholder="say Hello"><button id="send-console">Send</button></div></div>`;
+  $("send-console").onclick = () => sendCommandFromInput("console-command").catch(error => notice(error.message, true));
+  wireCommandInput("console-command");
+  loadLogs("console");
+}
+
+async function loadLogs(id) {
+  try {
+    const data = await api("/api/server/logs");
+    state.logs = data.lines || [];
+    const target = $(id);
+    if (target) target.textContent = state.logs.slice(-80).join("\n") || "No logs yet.";
+  } catch {}
+}
+
+function wireCommandInput(id) {
+  const input = $(id);
+  if (!input) return;
+  input.onkeydown = event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      sendCommandFromInput(id).catch(error => notice(error.message, true));
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!state.commandHistory.length) return;
+      if (state.commandHistoryIndex < 0) state.commandHistoryIndex = state.commandHistory.length;
+      state.commandHistoryIndex = Math.max(0, state.commandHistoryIndex - 1);
+      input.value = state.commandHistory[state.commandHistoryIndex] || "";
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (!state.commandHistory.length) return;
+      state.commandHistoryIndex = Math.min(state.commandHistory.length, state.commandHistoryIndex + 1);
+      input.value = state.commandHistory[state.commandHistoryIndex] || "";
+    }
+  };
+}
+
+async function sendCommandFromInput(id) {
+  const input = $(id);
+  const sent = await sendCommand(input?.value || "");
+  if (sent && input) input.value = "";
+}
+
+async function sendCommand(command) {
+  command = (command || "").trim();
+  if (!command) return false;
+  if (state.commandHistory[state.commandHistory.length - 1] !== command) {
+    state.commandHistory.push(command);
+    if (state.commandHistory.length > 40) state.commandHistory.shift();
+  }
+  state.commandHistoryIndex = state.commandHistory.length;
+  await post("/api/server/command", { command });
+  notice("Command sent");
+  await loadLogs("console");
+  await loadLogs("dash-console");
+  return true;
+}
+
+async function uploadTo(endpoint, input, onDone, options = {}) {
+  const files = Array.from(input.files || []);
+  if (!files.length) return null;
+  const form = new FormData();
+  files.forEach(file => form.append("file", file, options.preservePath ? (file.webkitRelativePath || file.name) : file.name));
+  try {
+    const res = await fetch(endpoint, { method: "POST", body: form });
+    if (!res.ok) throw new Error(await res.text());
+    const data = res.headers.get("content-type")?.includes("application/json") ? await res.json() : await res.text();
+    if (onDone) await onDone(data);
+    return data;
+  } finally {
+    input.value = "";
+  }
+}
+
+$("backup-upload").onchange = e => uploadTo("/api/backups/upload?restore=true", e.target, refresh).catch(err => notice(err.message, true));
+$("server-upload").onchange = e => uploadTo("/api/server/file/upload?" + q({ path: state.filePath, serverId: selectedServerIdForApi() }), e.target, () => loadFiles()).catch(err => notice(err.message, true));
+$("server-folder-upload").onchange = e => uploadTo("/api/server/file/upload?" + q({ path: state.filePath, serverId: selectedServerIdForApi(), tree: "1" }), e.target, () => loadFiles(), { preservePath: true }).catch(err => notice(err.message, true));
+$("mod-upload").onchange = e => uploadTo("/api/mods/upload?" + q({ serverId: selectedServerIdForApi() }), e.target, () => refresh(true)).catch(err => notice(err.message, true));
+$("server-icon-upload").onchange = e => uploadTo("/api/server/icon?" + q({ serverId: state.selectedServerId }), e.target, refresh).catch(err => notice(err.message, true));
+$("resource-pack-upload").onchange = e => uploadTo("/api/server/resource-pack?" + q({ serverId: selectedServerIdForApi() }), e.target, refresh).catch(err => notice(err.message, true));
+$("setup-world-upload").onchange = e => {
+  if (!e.target.files?.length) return;
+  state.setupWorldUploading = true;
+  syncSetupWorldUploadControls();
+  const seed = $("setup-seed");
+  seed?.dispatchEvent(new Event("input"));
+  uploadTo("/api/server/setup/world", e.target, null).then(data => {
+    if (!data) return;
+    state.setupWorldUpload = data;
+    notice("World upload ready");
+    if (seed) seed.value = "";
+  }).catch(err => notice(err.message, true)).finally(() => {
+    state.setupWorldUploading = false;
+    syncSetupWorldUploadControls();
+    seed?.dispatchEvent(new Event("input"));
+  });
+};
+$("refresh").onclick = refresh;
+
+setInterval(() => {
+  refresh();
+  if (state.page === "console" || state.page === "dashboard") loadLogs(state.page === "console" ? "console" : "dash-console");
+  if (state.setupProgress) updateSetupProgress();
+}, 3000);
+refresh();
+</script>
+</body>
+</html>

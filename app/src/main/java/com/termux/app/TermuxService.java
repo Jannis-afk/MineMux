@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.Resources;
 import android.net.wifi.WifiManager;
 import android.os.Binder;
@@ -22,6 +23,8 @@ import com.termux.R;
 import com.termux.app.event.SystemEventReceiver;
 import com.termux.app.terminal.TermuxTerminalSessionActivityClient;
 import com.termux.app.terminal.TermuxTerminalSessionServiceClient;
+import com.termux.app.minemux.MineMuxActivity;
+import com.termux.app.minemux.MineMuxRuntime;
 import com.termux.shared.termux.plugins.TermuxPluginUtils;
 import com.termux.shared.data.IntentUtils;
 import com.termux.shared.net.uri.UriUtils;
@@ -153,6 +156,10 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
                 case TERMUX_SERVICE.ACTION_SERVICE_EXECUTE:
                     Logger.logDebug(LOG_TAG, "ACTION_SERVICE_EXECUTE intent received");
                     actionServiceExecute(intent);
+                    break;
+                case MineMuxRuntime.ACTION_REFRESH_NOTIFICATION:
+                    Logger.logDebug(LOG_TAG, "ACTION_REFRESH_NOTIFICATION intent received");
+                    updateNotification();
                     break;
                 default:
                     Logger.logError(LOG_TAG, "Invalid action: \"" + action + "\"");
@@ -319,10 +326,6 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         mWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, TermuxConstants.TERMUX_APP_NAME.toLowerCase());
         mWifiLock.acquire();
 
-        if (!PermissionUtils.checkIfBatteryOptimizationsDisabled(this)) {
-            PermissionUtils.requestDisableBatteryOptimizations(this);
-        }
-
         updateNotification();
 
         Logger.logDebug(LOG_TAG, "WakeLocks acquired successfully");
@@ -360,6 +363,10 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         if (intent == null) {
             Logger.logError(LOG_TAG, "Ignoring null intent to actionServiceExecute");
             return;
+        }
+
+        if (intent.getBooleanExtra(MineMuxRuntime.EXTRA_ACQUIRE_WAKE_LOCK, false)) {
+            actionAcquireWakeLock();
         }
 
         ExecutionCommand executionCommand = new ExecutionCommand(TermuxShellManager.getNextShellId());
@@ -783,22 +790,25 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         Resources res = getResources();
 
         // Set pending intent to be launched when notification is clicked
-        Intent notificationIntent = TermuxActivity.newInstance(this);
+        Intent notificationIntent = new Intent(this, MineMuxActivity.class);
         PendingIntent contentIntent = PendingIntent.getActivity(this, 0, notificationIntent, 0);
 
 
         // Set notification text
         int sessionCount = getTermuxSessionsSize();
         int taskCount = mShellManager.mTermuxTasks.size();
-        String notificationText = sessionCount + " session" + (sessionCount == 1 ? "" : "s");
-        if (taskCount > 0) {
-            notificationText += ", " + taskCount + " task" + (taskCount == 1 ? "" : "s");
-        }
-
         final boolean wakeLockHeld = mWakeLock != null;
-        if (wakeLockHeld) notificationText += " (wake lock held)";
-
-
+        final boolean notificationsEnabled = mineMuxNotificationsEnabled();
+        String notificationText;
+        if (!notificationsEnabled && (taskCount > 0 || wakeLockHeld)) {
+            notificationText = wakeLockHeld ? "Server running - keep-awake enabled" : "Server running";
+        } else if (taskCount > 0) {
+            notificationText = wakeLockHeld ? "Server tools running - keep-awake enabled" : "Server tools running";
+        } else if (sessionCount > 0) {
+            notificationText = "Terminal recovery active";
+        } else {
+            notificationText = "Ready";
+        }
         // Set notification priority
         // If holding a wake or wifi lock consider the notification of high priority since it's using power,
         // otherwise use a low priority
@@ -808,7 +818,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         // Build the notification
         Notification.Builder builder =  NotificationUtils.geNotificationBuilder(this,
             TermuxConstants.TERMUX_APP_NOTIFICATION_CHANNEL_ID, priority,
-            TermuxConstants.TERMUX_APP_NAME, notificationText, null,
+            "MineMux Controller", notificationText, null,
             contentIntent, null, NotificationUtils.NOTIFICATION_MODE_SILENT);
         if (builder == null)  return null;
 
@@ -819,7 +829,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         builder.setSmallIcon(R.drawable.ic_service_notification);
 
         // Set background color for small notification icon
-        builder.setColor(0xFF607D8B);
+        builder.setColor(0xFF2E7D32);
 
         // TermuxSessions are always ongoing
         builder.setOngoing(true);
@@ -839,6 +849,11 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
 
 
         return builder.build();
+    }
+
+    private boolean mineMuxNotificationsEnabled() {
+        SharedPreferences preferences = getSharedPreferences("minemux", MODE_PRIVATE);
+        return preferences.getBoolean("notifications_enabled", true);
     }
 
     private void setupNotificationChannel() {
